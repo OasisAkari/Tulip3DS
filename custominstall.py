@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-
 # This file is a part of custom-install.py.
 #
 # custom-install is copyright (c) 2019-2020 Ian Burgwin
 # This file is licensed under The MIT License (MIT).
 # You can find the full license text in LICENSE.md in the root of this project.
-
+import os
+import shutil
+import stat
 from argparse import ArgumentParser
 from enum import Enum
 from glob import glob
@@ -205,6 +205,7 @@ def get_install_size(title: 'Union[CIAReader, CDNReader]'):
 
 class CustomInstall:
     def __init__(self, *, movable, sd, cifinish_out=None, overwrite_saves=False, skip_contents=False,
+                 force_install=False,
                  boot9=None, seeddb=None):
         self.event = Events()
         self.log_lines = []  # Stores all info messages for user to view
@@ -218,6 +219,7 @@ class CustomInstall:
         self.overwrite_saves = overwrite_saves
         self.cifinish_out = cifinish_out
         self.movable = movable
+        self.force_install = force_install
 
     def copy_with_progress(self, src: BinaryIO, dst: BinaryIO, size: int, path: str, fire_event: bool = True):
         left = size
@@ -251,19 +253,16 @@ class CustomInstall:
         return reader
 
     def prepare_titles(self, paths: 'List[PathLike]'):
-        if self.seeddb:
-            load_seeddb(self.seeddb)
-
         readers = []
         for path in paths:
-            self.log(f'Reading {path}')
+            self.log(f'读取 {path} 中')
             try:
                 reader = self.get_reader(path)
             except (CIAError, CDNError, TitleMetadataError):
-                self.log(f"Couldn't read {path}, likely corrupt or not a CIA or CDN title")
+                self.log(f"无法读取 {path}，似乎是损坏的（或者并不是一个有效的）CIA 或 CDN 应用。")
                 continue
             if reader.tmd.title_id.startswith('00048'):  # DSiWare
-                self.log(f'Skipping {reader.tmd.title_id} - DSiWare is not supported')
+                self.log(f'跳过 {reader.tmd.title_id} - 不支持 DSiWare 应用')
                 continue
             readers.append((reader, path))
         self.readers = readers
@@ -288,18 +287,18 @@ class CustomInstall:
         if is_windows:
             save3ds_fuse_path += '.exe'
         if not isfile(save3ds_fuse_path):
-            self.log("Couldn't find " + save3ds_fuse_path, 2)
+            self.log("无法找到 " + save3ds_fuse_path, 2)
             return None, False, 0
 
         crypto = self.crypto
         # TODO: Move a lot of these into their own methods
-        self.log("Finding path to install to...")
+        self.log("寻找需要安装到的路径中...")
         [sd_path, id1s] = self.get_sd_path()
         if len(id1s) > 1:
-            raise SDPathError(f'There are multiple id1 directories for id0 {crypto.id0.hex()}, '
-                              f'please remove extra directories')
+            raise SDPathError(f'ID0 文件夹 {crypto.id0.hex()} 下有多个 ID1 文件夹，'
+                              f'请移除多余的 ID1 文件夹，一般是最小的文件夹。')
         elif len(id1s) == 0:
-            raise SDPathError(f'Could not find a suitable id1 directory for id0 {crypto.id0.hex()}')
+            raise SDPathError(f'无法在 ID0 {crypto.id0.hex()} 文件夹下找到适合的 ID1 文件夹。')
         id1 = id1s[0]
         sd_path = join(sd_path, id1)
 
@@ -312,10 +311,10 @@ class CustomInstall:
             cifinish_data = load_cifinish(cifinish_path)
         except InvalidCIFinishError as e:
             self.log(f'{type(e).__qualname__}: {e}')
-            self.log(f'{cifinish_path} was corrupt!\n'
-                     f'This could mean an issue with the SD card or the filesystem. Please check it for errors.\n'
-                     f'It is also possible, though less likely, to be an issue with custom-install.\n'
-                     f'Exiting now to prevent possible issues. If you want to try again, delete cifinish.bin from the SD card and re-run custom-install.')
+            self.log(f'{cifinish_path} 是损坏的！\n'
+                     f'这可能意味着 SD 卡或其文件系统出了问题，请使用磁盘检查工具检查问题。\n'
+                     f'这也可能是 custom-install 自身的问题。\n'
+                     f'请关闭本程序以防止更大的问题出现，但是如果你还想再试试，请删除 SD 卡下的 cifinish.bin，然后再试。')
             return None, False, 0
 
         db_path = join(sd_path, 'dbs')
@@ -326,7 +325,7 @@ class CustomInstall:
             with gzip.open(join(script_dir, 'title.db.gz')) as f:
                 tdb = f.read()
 
-            self.log(f'Creating title.db...')
+            self.log(f'创建 title.db 中...')
             with open(titledb_path, 'wb') as o:
                 with self.crypto.create_ctr_io(Keyslot.SD, o, self.crypto.sd_path_to_iv('/dbs/title.db')) as e:
                     e.write(tdb)
@@ -338,7 +337,7 @@ class CustomInstall:
                     e.seek(0)
                     e.write(cmac.digest())
 
-            self.log(f'Creating import.db...')
+            self.log(f'创建 import.db 中...')
             with open(importdb_path, 'wb') as o:
                 with self.crypto.create_ctr_io(Keyslot.SD, o, self.crypto.sd_path_to_iv('/dbs/import.db')) as e:
                     e.write(tdb)
@@ -369,7 +368,7 @@ class CustomInstall:
                 extra_kwargs['creationflags'] = 0x08000000  # CREATE_NO_WINDOW
 
             # extract the title database to add our own entry to
-            self.log('Extracting Title Database...')
+            self.log('解压应用数据库中...')
             out = subprocess.run(save3ds_fuse_common_args + ['-x'],
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT,
@@ -378,10 +377,13 @@ class CustomInstall:
             if out.returncode:
                 for l in out.stdout.split('\n'):
                     self.log(l)
-                self.log('Command line:')
+                self.log('命令行：')
                 for l in pformat(out.args).split('\n'):
                     self.log(l)
                 return None, False, 0
+
+            if self.seeddb:
+                load_seeddb(self.seeddb)
 
             install_state = {'installed': [], 'failed': []}
 
@@ -401,7 +403,7 @@ class CustomInstall:
                     display_title = f'{cia.contents[0].exefs.icon.get_app_title().short_desc} - {cia.tmd.title_id}'
                 except:
                     display_title = cia.tmd.title_id
-                self.log(f'Installing {display_title}...')
+                self.log(f'安装 {display_title} 中...')
 
                 title_size = get_install_size(cia)
 
@@ -453,12 +455,13 @@ class CustomInstall:
 
                     # write the tmd
                     tmd_enc_path = content_root_cmd + '/' + tmd_filename
-                    self.log(f'Writing {tmd_enc_path}...')
+                    self.log(f'写入 {tmd_enc_path} 中...')
                     with open(join(temp_content_root, tmd_filename), 'wb') as o:
                         with self.crypto.create_ctr_io(Keyslot.SD, o, self.crypto.sd_path_to_iv(tmd_enc_path)) as e:
                             e.write(bytes(cia.tmd))
 
                     # in case the contents are corrupted
+
                     do_continue = False
                     # write each content
                     for co in cia.content_info:
@@ -470,16 +473,20 @@ class CustomInstall:
                         else:
                             content_enc_path = content_root_cmd + '/' + content_filename
                             content_out_path = join(temp_content_root, content_filename)
-                        self.log(f'Writing {content_enc_path}...')
+                        self.log(f'写入 {content_enc_path} 中...')
                         with cia.open_raw_section(co.cindex) as s, open(content_out_path, 'wb') as o:
                             result_hash = self.copy_with_progress(s, o, co.size, content_enc_path)
                         if result_hash != co.hash:
-                            self.log(f'WARNING: Hash does not match for {content_enc_path}!')
-                            install_state['failed'].append(display_title)
-                            rename(temp_title_root, temp_title_root + '-corrupted')
-                            do_continue = True
-                            self.event.update_status(path, InstallStatus.Failed)
-                            break
+                            self.log(f'警告：{content_enc_path} 的哈希值不匹配，CIA 文件可能已损坏！')
+                            if not self.force_install:
+                                install_state['failed'].append(display_title)
+                                shutil.rmtree(temp_title_root)
+                                self.log(f'{content_enc_path} 安装失败，已删除临时文件夹。')
+                                do_continue = True
+                                self.event.update_status(path, InstallStatus.Failed)
+                                break
+                            else:
+                                self.log("警告：强制安装已启用，将继续安装。这可能会导致安装的内容无法正常工作。")
 
                     if do_continue:
                         continue
@@ -493,18 +500,18 @@ class CustomInstall:
                             cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(sav_enc_path))
                             # in a new save, the first 0x20 are all 00s. the rest can be random
                             data = cipher.encrypt(b'\0' * 0x20)
-                            self.log(f'Generating blank save at {sav_enc_path}...')
+                            self.log(f'正在 {sav_enc_path} 生成空白存档中...')
                             with open(tmp_sav_out_path, 'wb') as o:
                                 o.write(data)
                                 o.write(b'\0' * (cia.tmd.save_size - 0x20))
                         else:
-                            self.log(f'Copying original save file from {sav_enc_path}...')
+                            self.log(f'正在从 {sav_enc_path} 复制原先的存档中...')
                             copy2(sav_out_path, tmp_sav_out_path)
 
                     # generate and write cmd
                     cmd_enc_path = content_root_cmd + '/cmd/' + cmd_filename
                     cmd_out_path = join(temp_content_root, 'cmd', cmd_filename)
-                    self.log(f'Generating {cmd_enc_path}')
+                    self.log(f'生成 {cmd_enc_path} 中')
                     highest_index = 0
                     content_ids = {}
 
@@ -552,7 +559,7 @@ class CustomInstall:
                     final += b''.join(cmacs)
 
                     cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(cmd_enc_path))
-                    self.log(f'Writing {cmd_enc_path}')
+                    self.log(f'写入 {cmd_enc_path} 中')
                     with open(cmd_out_path, 'wb') as o:
                         o.write(cipher.encrypt(final))
 
@@ -590,10 +597,15 @@ class CustomInstall:
                     b'\0' * 0x2c
                 ]
 
+                def remove_readonly(func, path, _):
+                    "Clear the readonly bit and reattempt the removal"
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+
                 self.event.update_status(path, InstallStatus.Finishing)
                 if isdir(title_root):
-                    self.log(f'Removing original install at {title_root}...')
-                    rmtree(title_root)
+                    self.log(f'正在从 {title_root} 移除原先的安装的文件中...')
+                    rmtree(title_root, onerror=remove_readonly)
 
                 makedirs(tidhigh_root, exist_ok=True)
                 rename(temp_title_root, title_root)
@@ -607,7 +619,7 @@ class CustomInstall:
                     o.write(b''.join(title_info_entry_data))
 
                 # import the directory, now including our title
-                self.log('Importing into Title Database...')
+                self.log('导入应用数据库中...')
                 out = subprocess.run(save3ds_fuse_common_args + ['-i'],
                                      stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT,
@@ -616,7 +628,7 @@ class CustomInstall:
                 if out.returncode:
                     for l in out.stdout.split('\n'):
                         self.log(l)
-                    self.log('Command line:')
+                    self.log('命令行：')
                     for l in pformat(out.args).split('\n'):
                         self.log(l)
                     install_state['failed'].append(display_title)
@@ -630,23 +642,23 @@ class CustomInstall:
             application_count = len(glob(join(tempdir, '00040000*')))
             if install_state['installed']:
                 if application_count >= 300:
-                    self.log(f'{application_count} installed applications were detected.', 1)
-                    self.log('The HOME Menu will only show 300 icons.', 1)
-                    self.log('Some applications (not updates or DLC) will need to be deleted.', 1)
+                    self.log(f'检测到已安装了 {application_count} 个应用。', 1)
+                    self.log('主菜单仅会显示 300 个应用。', 1)
+                    self.log('需要删除某些应用（应用更新和 DLC 除外）才能使安装的应用显示。', 1)
                 finalize_3dsx_orig_path = join(script_dir, 'custom-install-finalize.3dsx')
                 hb_dir = join(self.sd, '3ds')
                 finalize_3dsx_path = join(hb_dir, 'custom-install-finalize.3dsx')
                 if isfile(finalize_3dsx_orig_path):
-                    self.log('Copying finalize program to ' + finalize_3dsx_path)
+                    self.log('复制完成程序到' + finalize_3dsx_path)
                     makedirs(hb_dir, exist_ok=True)
                     copyfile(finalize_3dsx_orig_path, finalize_3dsx_path)
                     copied = True
 
-                self.log('FINAL STEP:')
-                self.log('Run custom-install-finalize through homebrew launcher.')
-                self.log('This will install a ticket and seed if required.')
+                self.log('最后一步：')
+                self.log('通过 Homebrew Launcher 运行 custom-install-finalize 程序。')
+                self.log('这将会为主机安装 ticket 和 seed（如果需要的话）。')
                 if copied:
-                    self.log('custom-install-finalize has been copied to the SD card.')
+                    self.log('custom-install-finalize 已被复制到 SD 卡。')
 
             return install_state, copied, application_count
 

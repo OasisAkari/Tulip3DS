@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
 import os
 import shutil
+import sys
+import traceback
+from datetime import datetime
+from io import BytesIO
+from os import environ
+from os.path import abspath, basename, dirname, join, isfile, isdir
+from pathlib import Path
+from threading import Thread, Lock
+from threading import Timer
+from typing import Tuple, List, Dict
+
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QUrl
+from PyQt6.QtGui import QPixmap, QIcon
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
+                             QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
+                             QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon)
+from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
+from pyctr.crypto.engine import b9_paths, BootromNotFoundError
+from pyctr.type.cdn import CDNError, CDNReader
+from pyctr.type.cia import CIAError, CIAReader
+from pyctr.type.tmd import TitleMetadataError
+from pyctr.util import config_dirs
+
+from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, CI_VERSION, is_windows
+
 # This file is a part of custom-install.py.
 #
 # custom-install is copyright (c) 2019-2020 Ian Burgwin
 # This file is licensed under The MIT License (MIT).
 # You can find the full license text in LICENSE.md in the root of this project.
 
-import sys
-from os import environ, scandir
-from os.path import abspath, basename, dirname, join, isfile, isdir
-from pathlib import Path
-from threading import Thread, Lock
-from datetime import datetime
-from typing import Tuple, List, Dict
-
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
-                             QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
-                             QTextEdit, QSplitter, QDialog, QAbstractItemView)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QThread, QUrl
-from PyQt6.QtGui import QPixmap, QIcon
-from io import BytesIO
-from threading import Timer
-
-from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
-from pyctr.crypto.engine import b9_paths, BootromNotFoundError
-from pyctr.util import config_dirs
-from pyctr.type.cdn import CDNError, CDNReader
-from pyctr.type.cia import CIAError, CIAReader
-from pyctr.type.tmd import TitleMetadataError
-
-from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, CI_VERSION
-
 file_parent = dirname(abspath(__file__))
 
 CI_VERSION = 'OasisAkari Modded 1.0'
+
 
 # automatically load boot9 if it's in the current directory
 b9_paths.insert(0, join(file_parent, 'boot9.bin'))
@@ -48,6 +49,19 @@ except KeyError:
     pass
 # automatically load seeddb if it's in the current directory
 seeddb_paths.insert(0, join(file_parent, 'seeddb.bin'))
+
+
+taskbar = None
+if is_windows:
+    try:
+        import comtypes.client as cc
+
+        tbl = cc.GetModule(file_parent + '/TaskbarLib.tlb')
+
+        taskbar = cc.CreateObject('{56FDF344-FD6D-11D0-958A-006097C9A090}', interface=tbl.ITaskbarList3)
+        taskbar.HrInit()
+    except (ModuleNotFoundError, UnicodeEncodeError, AttributeError):
+        pass
 
 def find_first_file(paths):
     for p in paths:
@@ -169,6 +183,11 @@ class AboutDialog(QDialog):
         close_button = QPushButton("关闭")
         close_button.clicked.connect(self.close)
 
+        # if is_mica_supported():
+        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
+
 
 class ListBoxDialog(QDialog):
     def __init__(self, parent, title: str, desc: str, items: List[str]):
@@ -197,6 +216,11 @@ class ListBoxDialog(QDialog):
         close_button = QPushButton("关闭")
         close_button.clicked.connect(self.close)
         layout.addWidget(close_button)
+
+        # if is_mica_supported():
+        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
 
 
 class CustomInstallGUI(QMainWindow):
@@ -247,7 +271,20 @@ class CustomInstallGUI(QMainWindow):
         self.log(f'汉化 & 修改 By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
         self.log("就绪。")
 
+        if taskbar:
+            # Set up taskbar button
+            taskbar.ActivateTab(int(self.winId()))
+
+        # if is_mica_supported():
+        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
+
         self.force_install = False
+        self.total_items = 0
+        self.finished_percent = 0
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.show()
 
 
     def setup_file_pickers(self):
@@ -400,7 +437,6 @@ class CustomInstallGUI(QMainWindow):
         directory = QFileDialog.getExistingDirectoryUrl(self, "选择 SD 卡根目录", QUrl("clsid:0AC0837C-BBF8-452A-850D-79D08E667CA7"))
         directory = directory.toLocalFile() if directory else None
         if directory:
-            print(directory)
             cifinish_path = join(directory, 'cifinish.bin')
             try:
                 load_cifinish(cifinish_path)
@@ -453,7 +489,7 @@ class CustomInstallGUI(QMainWindow):
 
     def _add_cias(self, paths):
         if not self.enabled_button:
-            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及相关文件。")
+            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
             return
         failed = {}
         for f in paths:
@@ -484,7 +520,7 @@ class CustomInstallGUI(QMainWindow):
 
     def _add_folder(self, path):
         if not self.enabled_button:
-            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及相关文件。")
+            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
             return
         if path:
             failed = {}
@@ -542,6 +578,7 @@ class CustomInstallGUI(QMainWindow):
                     pixmap = QPixmap()
                     pixmap.loadFromData(icon_data.getvalue())
                 except:
+                    traceback.print_exc()
                     pixmap = QPixmap()  # Empty pixmap if no icon
 
                 # Get cover art
@@ -553,6 +590,7 @@ class CustomInstallGUI(QMainWindow):
                     cover_art_pixmap.loadFromData(cover_art_data.getvalue())
                 except:
                     self.log("无法加载" + title_name + "的缩略图，跳过加载。" )
+                    traceback.print_exc()
                     cover_art_pixmap = QPixmap()  # Empty pixmap if no cover art
 
                 item = QTreeWidgetItem([
@@ -642,7 +680,7 @@ class CustomInstallGUI(QMainWindow):
         if self.enabled_button:
             self.status_label.setText('就绪。（可拖拽文件或文件夹至窗口添加 CIA）')
         else:
-            self.status_label.setText('请选择 SD 卡根目录及相关文件。')
+            self.status_label.setText('请选择 SD 卡根目录及 movable.sed。')
         return self.enabled_button
 
 
@@ -671,15 +709,21 @@ class CustomInstallGUI(QMainWindow):
         )
         if confirm == QMessageBox.StandardButton.Yes:
             timestamp = datetime.now().strftime('%H-%M-%S')
-            save_path = Path(file_parent) / f'custom-install-{timestamp}.log'
+            logs_path = Path(os.path.abspath('.')) / 'logs'
+            logs_path.mkdir(exist_ok=True)
+            save_path = logs_path / f'custom-install-{timestamp}.log'
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(self.log_window.toPlainText())
 
             QMessageBox.information(self, '成功', f'日志已保存到 {save_path}！')
             os.startfile(str(save_path.parent))
 
+
     def on_progress(self, total_percent: float, total_read: int, size: int):
         self.progress_bar.setValue(int(total_percent))
+        if taskbar:
+            max_percentage = 100 * self.total_items
+            taskbar.SetProgressValue(int(self.winId()), int(total_percent + self.finished_percent), max_percentage)
 
     def on_error(self, exc: Exception):
         self.log(f'错误：{exc}')
@@ -691,6 +735,10 @@ class CustomInstallGUI(QMainWindow):
         find_item = self.title_list.topLevelItem(idx)
         if find_item:
             find_item.setText(4, statuses.get(InstallStatus.Starting))
+        if taskbar:
+            self.finished_percent = idx * 100
+            max_percentage = 100 * self.total_items
+            taskbar.SetProgressValue(int(self.winId()), self.finished_percent, max_percentage)
 
     def on_status_update(self, path: str, status: InstallStatus):
         status_text = status.name if isinstance(status, InstallStatus) else str(status)
@@ -723,6 +771,7 @@ class CustomInstallGUI(QMainWindow):
         dial = ListBoxDialog(self, "以下应用已成功安装", tex, lst)
         dial.show()
 
+
     def on_failed_signal(self, lst: List[str]):
         if not lst:
             return
@@ -753,9 +802,10 @@ class CustomInstallGUI(QMainWindow):
         if not self.sd_path.text():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
+        src = Path(file_parent) / 'custom-install-finalize.3dsx'
         dst = Path(self.sd_path.text()) / '3ds' / 'custom-install-finalize.3dsx'
         try:
-            shutil.copy('custom-install-finalize.3dsx', dst)
+            shutil.copy(src, dst)
             QMessageBox.information(self, "成功", f"custom-install-finalize 已导出到 {dst}。")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出 custom-install-finalize 失败：{str(e)}")
@@ -788,6 +838,9 @@ class CustomInstallGUI(QMainWindow):
             if not movable_path:
                 raise Exception("未指定 movable.sed")
 
+            if taskbar:
+                taskbar.SetProgressState(int(self.winId()), tbl.TBPF_NORMAL)
+
             # Create CustomInstall instance
             custom_install = CustomInstall(
                 boot9=self.boot9_path.text() if self.boot9_path.text() else None,
@@ -800,19 +853,19 @@ class CustomInstallGUI(QMainWindow):
 
             # Set up event handlers
             custom_install.event.on_log_msg += lambda msg, **kwargs: self.signals.log_signal.emit(str(msg))
-            custom_install.event.update_percentage += lambda total_percent, total_read, size: self.signals.progress_signal.emit(total_percent, total_read, size)
+            custom_install.event.update_percentage += lambda total_percent, total_read, size: self.signals.progress_signal.emit(total_percent, int(total_read), int(size))
             custom_install.event.on_error += lambda exc: self.signals.error_signal.emit(exc)
             custom_install.event.on_cia_start += lambda idx: self.signals.cia_start_signal.emit(idx)
             custom_install.event.update_status += lambda path, status: self.signals.status_signal.emit(path, status)
 
             # Prepare readers in the order they appear in the tree
             root = self.title_list.invisibleRootItem()
-            total_items = root.childCount()
+            self.total_items = root.childCount()
 
-            self.log(f"找到了 {total_items} 个应用")
+            self.log(f"找到了 {self.total_items} 个应用")
 
             # Create list of readers in the order they appear in the tree
-            for i in range(total_items):
+            for i in range(self.total_items):
                 item = root.child(i)
                 path = item.text(1)
                 if self.install_and_delete.isChecked():
@@ -861,10 +914,20 @@ class CustomInstallGUI(QMainWindow):
             if self.install_and_delete.isChecked():
                 self.signals.remove_signal.emit()
 
+            # Show notification
+            QApplication.alert(self, 60000)
+            self.tray_icon.showMessage(
+                "custom install安装完成",
+                "请检查窗口以获取安装结果。",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000  # Duration in milliseconds
+            )
+
 
 def main():
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon('logo.ico'))
+    icon = QIcon(file_parent + '/logo.ico')
+    app.setWindowIcon(icon)
     window = CustomInstallGUI()
     window.show()
     sys.exit(app.exec())

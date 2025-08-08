@@ -35,7 +35,7 @@ from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, In
 
 file_parent = dirname(abspath(__file__))
 
-CI_VERSION = 'OasisAkari Modded 1.0'
+CI_VERSION = 'OasisAkari Modded 1.2'
 
 
 # automatically load boot9 if it's in the current directory
@@ -111,6 +111,8 @@ class InstallSignals(QObject):
     remove_signal = pyqtSignal()
     force_install_signal = pyqtSignal(bool)
     export_finalize_signal = pyqtSignal()
+    recover_pending_install_signal = pyqtSignal()
+    delete_corrupted_files_signal = pyqtSignal()
 
 
 signals = InstallSignals()
@@ -178,6 +180,34 @@ class AboutDialog(QDialog):
                 signals.export_finalize_signal.emit()
 
         export_button.clicked.connect(export_finalize)
+
+        recover_button = QPushButton("恢复未完成的安装")
+        layout.addWidget(recover_button)
+
+        def recover_pending_install():
+            confirm = QMessageBox.question(
+                self, "恢复未完成的安装", "你确定要恢复未完成的安装吗？\n"
+                "这将会尝试从 SD 卡根目录的 ci-pending 文件夹中恢复上次未完成的安装。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                signals.recover_pending_install_signal.emit()
+        recover_button.clicked.connect(recover_pending_install)
+
+        # Add delete corrupted files button
+        delete_button = QPushButton("删除损坏的文件")
+        layout.addWidget(delete_button)
+        def delete_corrupted_files():
+            confirm = QMessageBox.question(
+                self, "删除损坏的文件", "你确定要删除损坏的文件吗？\n"
+                "这将会尝试从 SD 卡根目录的 ci-install-temp 为前缀的文件夹中删除所有损坏的文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if confirm == QMessageBox.StandardButton.Yes:
+                signals.delete_corrupted_files_signal.emit()
+
+        delete_button.clicked.connect(delete_corrupted_files)
+
 
         # Add close button
         close_button = QPushButton("关闭")
@@ -265,6 +295,8 @@ class CustomInstallGUI(QMainWindow):
         self.signals.remove_signal.connect(self.on_remove_signal)
         self.signals.force_install_signal.connect(self.on_force_install_signal)
         self.signals.export_finalize_signal.connect(self.on_export_finalize_signal)
+        self.signals.recover_pending_install_signal.connect(self.on_recover_pending_install_signal)
+        self.signals.delete_corrupted_files_signal.connect(self.on_delete_corrupted_files_signal)
 
         # Initial state
         self.log(f'custom-install {CI_VERSION} - https://github.com/ihaveamac/custom-install')
@@ -623,7 +655,7 @@ class CustomInstallGUI(QMainWindow):
 
     # Drag and drop support
     def dragEnterEvent(self, e):
-        if e.mimeData().hasText():
+        if e.mimeData().hasText() and self.add_cia_button.isEnabled():
             e.accept()
         else:
             e.ignore()
@@ -659,6 +691,7 @@ class CustomInstallGUI(QMainWindow):
         except Exception as e:
             self.log(f'无法加载 boot9 文件：{e}')
         return self.b9_loaded
+
 
     def switch_button_states(self, enabled: bool):
         self.add_cia_button.setEnabled(enabled)
@@ -748,7 +781,8 @@ class CustomInstallGUI(QMainWindow):
             'Writing': '写入中',
             'Finishing': '完成中',
             'Done': '完成',
-            'Failed': '失败'
+            'Failed': '失败',
+            'Warning': '警告',
         }
         self.log(f'状态更新 {path}：{cn_text[status_text]}')
         # Find and update the item in the tree widget
@@ -810,6 +844,49 @@ class CustomInstallGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出 custom-install-finalize 失败：{str(e)}")
             self.log(f"导出 custom-install-finalize 失败：{str(e)}")
+
+    def on_recover_pending_install_signal(self):
+        if not self.sd_path.text():
+            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
+            return
+        pending_path = Path(self.sd_path.text()) / 'ci-pending'
+        if not pending_path.exists() or not pending_path.is_dir():
+            QMessageBox.warning(self, "错误", f"未找到 ci-pending 文件夹：{pending_path}")
+            return
+        try:
+            for p in pending_path.iterdir():
+                self.log('正在恢复未完成的安装：' + str(p))
+                shutil.move(str(p), str(pending_path / '..'))
+        except Exception:
+            self.log(f"恢复未完成的安装失败：")
+            self.log(traceback.format_exc())
+        QMessageBox.information(self, "信息", "已尝试恢复未完成的安装。请检查控制台输出。")
+        shutil.rmtree(pending_path)
+
+
+    def on_delete_corrupted_files_signal(self):
+        if not self.sd_path.text():
+            QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
+            return
+        deleted = False
+        for p in Path(self.sd_path.text()).glob('ci-install-temp*'):
+            deleted = True
+            if p.is_dir():
+                try:
+                    shutil.rmtree(p)
+                    self.log(f"已删除损坏的文件夹：{p}")
+                except Exception as e:
+                    self.log(f"无法删除 {p}：{str(e)}")
+            elif p.is_file():
+                try:
+                    p.unlink()
+                    self.log(f"已删除损坏的文件：{p}")
+                except Exception as e:
+                    self.log(f"无法删除 {p}：{str(e)}")
+        if deleted:
+            QMessageBox.information(self, "成功", "已删除所有损坏的文件。")
+        else:
+            QMessageBox.information(self, "失败", "未找到任何损坏的文件。")
 
     def start_install(self):
         if not self.readers:

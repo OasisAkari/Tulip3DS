@@ -6,6 +6,7 @@
 import os
 import shutil
 import stat
+import traceback
 from argparse import ArgumentParser
 from enum import Enum
 from glob import glob
@@ -85,6 +86,7 @@ class InstallStatus(Enum):
     Finishing = 3
     Done = 4
     Failed = 5
+    Warning = 6
 
 
 def get_free_space(path: 'Union[PathLike, bytes, str]'):
@@ -428,9 +430,12 @@ class CustomInstall:
 
                 # this is where the final directory will be moved
                 tidhigh_root = join(sd_path, 'title', tid_parts[0])
-
+                falisafe_root = join('/ci-pending/', tidhigh_root)
                 # get the title root where all the contents will be
+
                 title_root = join(sd_path, 'title', *tid_parts)
+                falisafe_title_root = join('/ci-pending/', title_root)
+
                 content_root = join(title_root, 'content')
                 # generate the path used for the IV
                 title_root_cmd = f'/title/{"/".join(tid_parts)}'
@@ -607,8 +612,26 @@ class CustomInstall:
                     self.log(f'正在从 {title_root} 移除原先的安装的文件中...')
                     rmtree(title_root, onerror=remove_readonly)
 
-                makedirs(tidhigh_root, exist_ok=True)
-                rename(temp_title_root, title_root)
+                warning = False
+                try:
+                    makedirs(tidhigh_root, exist_ok=True)
+                    rename(temp_title_root, title_root)
+                except:
+                    self.log(f'无法将 {temp_title_root} 重命名为 {title_root}，请检查 SD 卡是否已满或损坏。')
+                    self.log(traceback.format_exc())
+                    self.log(f'尝试将 {temp_title_root} 重命名为 {falisafe_root} 中...')
+                    self.log('如果重命名成功，后续尝试点击 “关于” -> “恢复未安装成功的应用” 处恢复应用。')
+                    try:
+                        makedirs(falisafe_root, exist_ok=True)
+                        rename(temp_title_root, falisafe_title_root)
+                        warning = True
+                        self.log(f'已将 {temp_title_root} 重命名为 {falisafe_root}，请稍后尝试恢复应用。')
+                    except:
+                        self.log(f'无法将 {temp_title_root} 重命名为 {falisafe_root}，请检查 SD 卡是否已满或损坏。')
+                        self.log(traceback.format_exc())
+                        install_state['failed'].append(display_title)
+                        self.event.update_status(path, InstallStatus.Failed)
+                        continue
 
                 cifinish_data[int(cia.tmd.title_id, 16)] = {'seed': (get_seed(cia.contents[0].program_id) if cia.contents[0].flags.uses_seed else None)}
 
@@ -636,6 +659,9 @@ class CustomInstall:
                 else:
                     install_state['installed'].append(display_title)
                     self.event.update_status(path, InstallStatus.Done)
+                if warning:
+                    self.event.update_status(path, InstallStatus.Warning)
+
 
             copied = False
             # launchable applications, not DLC or update data

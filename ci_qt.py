@@ -10,11 +10,12 @@ from os.path import abspath, basename, dirname, join, isfile, isdir
 from pathlib import Path
 from threading import Thread, Lock
 from threading import Timer
-from typing import Tuple, List, Dict
+from time import sleep
+from typing import Tuple, List, Dict, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QUrl
-from PyQt6.QtGui import QPixmap, QIcon
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl
+from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
                              QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
                              QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon)
@@ -24,8 +25,11 @@ from pyctr.type.cdn import CDNError, CDNReader
 from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
 from pyctr.util import config_dirs
+from conv_embed import conventer
 
 from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, CI_VERSION, is_windows
+
+# from winmica import is_mica_supported, ApplyMica, MicaType
 
 # This file is a part of custom-install.py.
 #
@@ -35,7 +39,7 @@ from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, In
 
 file_parent = dirname(abspath(__file__))
 
-CI_VERSION = 'OasisAkari Modded 1.2'
+CI_VERSION = 'OasisAkari Modded 1.4'
 
 
 # automatically load boot9 if it's in the current directory
@@ -61,12 +65,13 @@ if is_windows:
         taskbar = cc.CreateObject('{56FDF344-FD6D-11D0-958A-006097C9A090}', interface=tbl.ITaskbarList3)
         taskbar.HrInit()
     except (ModuleNotFoundError, UnicodeEncodeError, AttributeError):
+        traceback.print_exc()
         pass
 
 def find_first_file(paths):
     for p in paths:
         if isfile(p):
-            return p
+            return p.replace('\\', '/')
 
 
 timer: Dict[str, Timer] = {}
@@ -113,6 +118,7 @@ class InstallSignals(QObject):
     export_finalize_signal = pyqtSignal()
     recover_pending_install_signal = pyqtSignal()
     delete_corrupted_files_signal = pyqtSignal()
+    finished_signal = pyqtSignal()
 
 
 signals = InstallSignals()
@@ -272,54 +278,6 @@ class CustomInstallGUI(QMainWindow):
         self.signals = signals
 
         # Setup UI components
-        self.setup_file_pickers()
-        self.setup_title_buttons()
-        self.setup_title_list()
-        self.setup_progress()
-        self.setup_controls()
-
-        # textChanged signals
-        self.sd_path.textChanged.connect(self.update_button_states)
-        self.movable_path.textChanged.connect(self.update_button_states)
-        self.seeddb_path.textChanged.connect(self.update_button_states)
-        self.boot9_path.textChanged.connect(self.update_button_states)
-
-        # Setup signals
-        self.signals.log_signal.connect(self.on_log)
-        self.signals.progress_signal.connect(self.on_progress)
-        self.signals.error_signal.connect(self.on_error)
-        self.signals.cia_start_signal.connect(self.on_cia_start)
-        self.signals.status_signal.connect(self.on_status_update)
-        self.signals.installed_signal.connect(self.on_installed_signal)
-        self.signals.failed_signal.connect(self.on_failed_signal)
-        self.signals.remove_signal.connect(self.on_remove_signal)
-        self.signals.force_install_signal.connect(self.on_force_install_signal)
-        self.signals.export_finalize_signal.connect(self.on_export_finalize_signal)
-        self.signals.recover_pending_install_signal.connect(self.on_recover_pending_install_signal)
-        self.signals.delete_corrupted_files_signal.connect(self.on_delete_corrupted_files_signal)
-
-        # Initial state
-        self.log(f'custom-install {CI_VERSION} - https://github.com/ihaveamac/custom-install')
-        self.log(f'汉化 & 修改 By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
-        self.log("就绪。")
-
-        if taskbar:
-            # Set up taskbar button
-            taskbar.ActivateTab(int(self.winId()))
-
-        # if is_mica_supported():
-        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        #     hwnd = int(self.winId())
-        #     ApplyMica(hwnd, MicaType.MICA)
-
-        self.force_install = False
-        self.total_items = 0
-        self.finished_percent = 0
-        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
-        self.tray_icon.show()
-
-
-    def setup_file_pickers(self):
         # SD Root picker
         sd_layout = QHBoxLayout()
         self.sd_label = QLabel('SD 卡根目录：')
@@ -371,7 +329,6 @@ class CustomInstallGUI(QMainWindow):
         self.layout.addLayout(movable_layout)
 
 
-    def setup_title_buttons(self):
         button_layout = QHBoxLayout()
 
         self.add_cia_button = QPushButton('添加 CIA')
@@ -396,8 +353,6 @@ class CustomInstallGUI(QMainWindow):
 
         self.layout.addLayout(button_layout)
 
-
-    def setup_title_list(self):
         # Create a splitter for the tree view and log window
         self.splitter = QSplitter()
         self.splitter.setOrientation(Qt.Orientation.Vertical)
@@ -420,14 +375,18 @@ class CustomInstallGUI(QMainWindow):
         self.log_window.setMinimumHeight(100)
         self.splitter.addWidget(self.log_window)
 
-    def setup_progress(self):
+        # Setup progress bar
         self.progress_bar_text = QLabel('')
         self.layout.addWidget(self.progress_bar_text)
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(100)
         self.layout.addWidget(self.progress_bar)
 
-    def setup_controls(self):
+        if taskbar:
+            # Set up taskbar button
+            taskbar.ActivateTab(int(self.winId()))
+
+        # Control buttons and options
         control_layout = QHBoxLayout()
 
         self.skip_contents = QCheckBox('跳过内容（仅将信息加入数据库）')
@@ -453,11 +412,50 @@ class CustomInstallGUI(QMainWindow):
 
         self.dialog = None
 
-
         self.layout.addLayout(control_layout)
 
         self.status_label = QLabel()
         self.layout.addWidget(self.status_label)
+
+        # textChanged signals
+        self.sd_path.textChanged.connect(self.update_button_states)
+        self.movable_path.textChanged.connect(self.update_button_states)
+        self.seeddb_path.textChanged.connect(self.update_button_states)
+        self.boot9_path.textChanged.connect(self.update_button_states)
+
+        # Setup signals
+        self.signals.log_signal.connect(self.on_log)
+        self.signals.progress_signal.connect(self.on_progress)
+        self.signals.error_signal.connect(self.on_error)
+        self.signals.cia_start_signal.connect(self.on_cia_start)
+        self.signals.status_signal.connect(self.on_status_update)
+        self.signals.installed_signal.connect(self.on_installed_signal)
+        self.signals.failed_signal.connect(self.on_failed_signal)
+        self.signals.remove_signal.connect(self.on_remove_signal)
+        self.signals.force_install_signal.connect(self.on_force_install_signal)
+        self.signals.export_finalize_signal.connect(self.on_export_finalize_signal)
+        self.signals.recover_pending_install_signal.connect(self.on_recover_pending_install_signal)
+        self.signals.delete_corrupted_files_signal.connect(self.on_delete_corrupted_files_signal)
+        self.signals.finished_signal.connect(self.on_finished_signal)
+
+        # Initial state
+        self.log(f'custom-install {CI_VERSION} - https://github.com/OasisAkari/custom-install')
+        self.log(f'汉化 & 修改 By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
+        self.log("就绪。")
+
+        # if is_mica_supported():
+        #     # self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
+
+        self.force_install = False
+        self.total_items = 0
+        self.finished_percent = 0
+        self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+        self.tray_icon.show()
+
+        self.enabled_button = False
+
 
     def show_about(self):
         if not self.dialog:
@@ -492,7 +490,7 @@ class CustomInstallGUI(QMainWindow):
         self.update_button_states()
 
 
-    def auto_detect_file(self, sd_root: str, filename: str) -> str:
+    def auto_detect_file(self, sd_root: str, filename: str) -> Optional[str]:
         paths = [join(sd_root, 'gm9', 'out', filename), join(sd_root, filename)]
         found_path = find_first_file(paths)
         if found_path:
@@ -510,13 +508,13 @@ class CustomInstallGUI(QMainWindow):
         file_name, _ = QFileDialog.getOpenFileName(self, f"选择 {file_type}", "", f"{file_type} ({file_filter})")
         if file_name:
             if file_type == 'boot9':
-                self.boot9_path.setText(file_name)
+                self.boot9_path.setText(file_name.replace('\\', '/'))
                 self.check_b9_loaded()
             elif file_type == 'seeddb':
-                self.seeddb_path.setText(file_name)
-                load_seeddb(file_name)
+                self.seeddb_path.setText(file_name.replace('\\', '/'))
+                load_seeddb(file_name.replace('\\', '/'))
             elif file_type == 'movable.sed':
-                self.movable_path.setText(file_name)
+                self.movable_path.setText(file_name.replace('\\', '/'))
         self.update_button_states()
 
     def _add_cias(self, paths):
@@ -536,7 +534,7 @@ class CustomInstallGUI(QMainWindow):
             QMessageBox.warning(self, "无法添加应用", error_text)
 
     def add_cias(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择 CIA 文件", "", "CIA 文件 (*.cia)")
+        files, _ = QFileDialog.getOpenFileNames(self, "选择 CIA 文件", "", "应用文件 (*.cia *.3ds *.cci)")
         if files:
             self._add_cias(files)
 
@@ -550,19 +548,25 @@ class CustomInstallGUI(QMainWindow):
             else:
                 QMessageBox.critical(self, "错误", f"CDN 文件夹内未找到 tmd 文件：\n{directory}")
 
-    def _add_folder(self, path):
+    def _add_folder(self, path, delete=False):
         if not self.enabled_button:
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
             return
         if path:
+            path = str(path).replace('\\', '/')
             failed = {}
             for root, dirs, files in os.walk(path):
                 for file in files:
-                    file_path = join(root, file)
+                    file_path = join(root, file).replace('\\', '/')
                     if file_path.lower().endswith('.cia'):
                         success, reason = self.add_cia(str(file_path))
                         if not success:
                             failed[file_path] = reason
+                        else:
+                            if delete:
+                                self.pending_remove.append(str(file_path))
+                    if file_path.lower().endswith('.3ds') or file_path.lower().endswith('.cci'):
+                        self.add_game_card_image(str(file_path))
             if failed:
                 error_text = "无法添加以下文件：\n\n"
                 for path, reason in failed.items():
@@ -570,8 +574,9 @@ class CustomInstallGUI(QMainWindow):
                 QMessageBox.warning(self, "添加软件失败", error_text)
 
     def add_folder(self):
-        directory = QFileDialog.getExistingDirectory(self, "选择包含了 CIA 文件的文件夹")
-        self._add_folder(directory)
+        directory, _ = QFileDialog.getOpenFileName(self, "选择包含了 CIA 文件的文件夹", "", "应用文件 (*.cia *.3ds *.cci)")
+        _dir = str(Path(directory).parent)
+        self._add_folder(_dir)
 
     def remove_selected(self):
         for item in self.title_list.selectedItems():
@@ -579,9 +584,33 @@ class CustomInstallGUI(QMainWindow):
             path = item.text(1)
             if path in self.readers:
                 del self.readers[path]
+            self.log(f'已从列表中移除：{path}')
+            self.log(f"检查待删除列表中是否包含 {path}...")
+            self.log(*self.pending_remove)
+            if path in self.pending_remove:
+                self.pending_remove.remove(path)
+                if os.path.exists(path):
+                    try:
+                        self.log(f'正在删除目录 {path}...')
+                        os.remove(path)
+                        self.log("已删除：", path)
+                        _p = Path(path)
+                        if _p.parent.exists():
+                            if not any(_p.parent.iterdir()) and _p.parent.name.startswith('ci-install-temp'):
+                                _pp = str(_p.parent).replace("\\", "/")
+                                self.log(f'目录 {_pp} 为空，尝试删除...')
+                                _p.parent.rmdir()
+                                self.log(f'已删除空目录：{_pp}')
+                    except Exception as e:
+                        self.log(f'无法删除目录 {path}：{e}')
+            else:
+                self.log(f'待删除列表中不包含 {path}，无需执行任何操作。')
 
     def add_cia(self, path: str) -> Tuple[bool, str]:
         try:
+            path = path.replace('\\', '/')
+            if path.lower().endswith('.3ds') or path.lower().endswith('.cci'):
+                return self.add_game_card_image(path)
             with self.lock:
                 if path in self.readers:
                     return False, '应用已添加在列表中'
@@ -653,6 +682,41 @@ class CustomInstallGUI(QMainWindow):
         except Exception as e:
             return False, str(e)
 
+    def add_game_card_image(self, path: str):
+        changed_button = False
+        try:
+            with self.lock:
+                path = path.replace('\\', '/')
+                info = QMessageBox.question(self, "添加游戏卡镜像", f"{path} 是一个游戏卡镜像文件。\n"
+                                                                f"本工具可以帮你预先转换好文件为 CIA 格式，但这需要一点时间转换。\n"
+                                                                f"是否继续？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if info == QMessageBox.StandardButton.No:
+                    self.log('取消添加游戏卡镜像：' + path)
+                    return
+                self.switch_button_states(False)
+                changed_button = True
+                timestamp = datetime.now().strftime('%H-%M-%S')
+                tmp_dir = str(Path(file_parent) / f'ci-install-temp-{timestamp}').replace('\\', '/')
+                os.makedirs(tmp_dir, exist_ok=True)
+                self.log(f'正在转换游戏卡镜像 {path} 为 CIA 格式...')
+                conventer(log=self.log,
+                          verbose=True,
+                          game=[path],
+                          output=tmp_dir,
+                          boot9=self.boot9_path.text(),
+                          ignore_bad_hashes=self.force_install)
+            self.log(f'转换完成，已缓存到 {tmp_dir}。正在添加到列表中...')
+            self._add_folder(tmp_dir, delete=True)
+            self.log(f'将缓存文件添加到待删除列表。')
+        except Exception as e:
+            self.log(f'无法添加游戏卡镜像：{e}')
+            self.log(traceback.format_exc())
+            return False, str(e)
+        finally:
+            if changed_button:
+                self.switch_button_states(True)
+        return True, ''
+
     # Drag and drop support
     def dragEnterEvent(self, e):
         if e.mimeData().hasText() and self.add_cia_button.isEnabled():
@@ -665,11 +729,14 @@ class CustomInstallGUI(QMainWindow):
         filePath = filePathList.split('\n')
         cias = []
         dirs = []
+        cards = []
         for p in filePath:
             p = p.replace('file:///', '', 1).strip()
             if p and isfile(p):
                 if p.lower().endswith('.cia'):
                     cias.append(p)
+                if p.lower().endswith('.3ds') or p.lower().endswith('.cci'):
+                    cards.append(p)
             elif p and isdir(p):
                 dirs.append(p)
         if cias:
@@ -677,7 +744,9 @@ class CustomInstallGUI(QMainWindow):
         if dirs:
             for d in dirs:
                 self._add_folder(d)
-
+        if cards:
+            for card in cards:
+                self.add_game_card_image(card)
 
     def check_b9_loaded(self):
         self.b9_loaded = False
@@ -700,7 +769,6 @@ class CustomInstallGUI(QMainWindow):
         self.remove_button.setEnabled(enabled)
         self.start_button.setEnabled(enabled)
 
-    enabled_button = False
 
     def _update_button_states(self):
         self.enabled_button = all([self.check_b9_loaded(),
@@ -721,11 +789,12 @@ class CustomInstallGUI(QMainWindow):
         # anti debounce
         d = debounce(self._update_button_states, 0.5)
         d()
+        self.repaint()
 
 
-    def log(self, message: str):
+    def log(self, *msg, end='\n'):
         timestamp = datetime.now().strftime('%H:%M:%S')
-        log_msg = f"{timestamp} - {message}"
+        log_msg = f"{timestamp} - {end.join(msg)}"
         self.signals.log_signal.emit(log_msg)
 
     def on_log(self, message: str):
@@ -734,6 +803,7 @@ class CustomInstallGUI(QMainWindow):
         self.log_window.verticalScrollBar().setValue(
             self.log_window.verticalScrollBar().maximum()
         )
+        self.repaint()
 
     def save_log(self):
         confirm = QMessageBox.question(
@@ -818,12 +888,28 @@ class CustomInstallGUI(QMainWindow):
     def on_remove_signal(self):
         if self.pending_remove:
             for path in self.pending_remove:
-                try:
-                    os.remove(path)
-                    self.log(f"已删除 {path}")
-                except Exception as e:
-                    self.log(f"无法删除 {path}：{str(e)}")
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        self.log(f"已删除 {path}")
+                        _p = Path(path)
+                        if _p.parent.exists() and _p.parent.name.startswith('ci-install-temp'):
+                            if not any(_p.parent.iterdir()):
+                                _pp = str(_p.parent).replace("\\", "/")
+                                self.log(f'目录 {_pp} 为空，尝试删除...')
+                                _p.parent.rmdir()
+                                self.log(f'已删除空目录：{_pp}')
+                    except Exception as e:
+                        self.log(f"无法删除 {path}：{str(e)}")
             self.pending_remove.clear()
+
+    def closeEvent(self, event):
+        self.title_list.clear()
+        self.readers.clear()
+        if self.pending_remove:
+            self.signals.remove_signal.emit()
+            sleep(len(self.pending_remove) * 0.1)
+        event.accept()
 
     def on_force_install_signal(self, force: bool):
         self.force_install = force
@@ -888,6 +974,32 @@ class CustomInstallGUI(QMainWindow):
         else:
             QMessageBox.information(self, "失败", "未找到任何损坏的文件。")
 
+    def on_finished_signal(self):
+        try:
+            self.title_list.clear()
+            self.readers.clear()
+            # Re-enable install button
+            self.start_button.setEnabled(True)
+            self.switch_button_states(True)
+            self.progress_bar_text.setText('')
+            self.progress_bar.reset()
+
+            if taskbar:
+                taskbar.SetProgressState(int(self.winId()), tbl.TBPF_NOPROGRESS)
+
+            self.signals.remove_signal.emit()
+
+            # Show notification
+            QApplication.alert(self, 60000)
+            self.tray_icon.showMessage(
+                "custom install安装完成",
+                "请检查窗口以获取安装结果。",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000  # Duration in milliseconds
+            )
+        except Exception as e:
+            self.log(f"清理安装状态时发生错误：{str(e)}")
+
     def start_install(self):
         if not self.readers:
             self.signals.log_signal.emit("你还没有添加任何应用，请先添加一个再进行安装。")
@@ -925,7 +1037,8 @@ class CustomInstallGUI(QMainWindow):
                 movable=movable_path,
                 sd=sd_path,
                 skip_contents=self.skip_contents.isChecked(),
-                overwrite_saves=self.overwrite_saves.isChecked()
+                overwrite_saves=self.overwrite_saves.isChecked(),
+                force_install=self.force_install
             )
 
             # Set up event handlers
@@ -979,26 +1092,7 @@ class CustomInstallGUI(QMainWindow):
             self.signals.error_signal.emit(e)
             self.status_label.setText('安装失败。')
         finally:
-
-            self.title_list.clear()
-            self.readers.clear()
-            # Re-enable install button
-            self.start_button.setEnabled(True)
-            self.switch_button_states(True)
-            self.progress_bar_text.setText('')
-            self.progress_bar.reset()
-
-            if self.install_and_delete.isChecked():
-                self.signals.remove_signal.emit()
-
-            # Show notification
-            QApplication.alert(self, 60000)
-            self.tray_icon.showMessage(
-                "custom install安装完成",
-                "请检查窗口以获取安装结果。",
-                QSystemTrayIcon.MessageIcon.Information,
-                2000  # Duration in milliseconds
-            )
+            self.signals.finished_signal.emit()
 
 
 def main():

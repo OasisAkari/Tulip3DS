@@ -3,6 +3,8 @@ import os
 import shutil
 import sys
 import traceback
+import pyzipper as zipfile
+import tempfile
 from datetime import datetime
 from io import BytesIO
 from os import environ
@@ -10,24 +12,36 @@ from os.path import abspath, basename, dirname, join, isfile, isdir
 from pathlib import Path
 from threading import Thread, Lock
 from threading import Timer
-from time import sleep
+from time import sleep, time
 from typing import Tuple, List, Dict, Optional
 
+try:
+    import py7zr
+except ImportError:
+    py7zr = None
+
+try:
+    import rarfile
+except ImportError:
+    rarfile = None
+
 from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl
-from PySide6.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QPixmap, QIcon, QDragEnterEvent
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
                              QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
-                             QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon)
+                             QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
+                             QHeaderView)
 from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
 from pyctr.crypto.engine import b9_paths, BootromNotFoundError
 from pyctr.type.cdn import CDNError, CDNReader
 from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
 from pyctr.util import config_dirs
+
 from conv_embed import conventer
 
-from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, CI_VERSION, is_windows
+from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, is_windows, get_install_size
 
 # from winmica import is_mica_supported, ApplyMica, MicaType
 
@@ -39,7 +53,7 @@ from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, In
 
 file_parent = dirname(abspath(__file__))
 
-CI_VERSION = 'OasisAkari Modded 1.4'
+CI_VERSION = 'OasisAkari Modded 1.5'
 
 
 # automatically load boot9 if it's in the current directory
@@ -105,9 +119,300 @@ statuses = {
 }
 
 
+def format_file_size(size: int) -> str:
+    if size < 1024:
+        return f'{size} B'
+
+    units = ['KiB', 'MiB', 'GiB', 'TiB']
+    value = float(size)
+    for unit in units:
+        value /= 1024
+        if value < 1024 or unit == units[-1]:
+            return f'{value:.1f} {unit}'
+
+    return f'{size} B'
+
+
+def get_disk_info(path: str, log=print) -> Tuple[str, str]:
+    try:
+        if not path or not isdir(path):
+            return '', ''
+        usage = shutil.disk_usage(path)
+        return format_file_size(usage.total), format_file_size(usage.free)
+    except Exception as e:
+        log(f'获取磁盘信息失败: {e}')
+        return '', ''
+
+
+class ConvertDialog(QDialog):
+    """Dialog for converting 3DS/CCI files to CIA format"""
+    # Signals to safely communicate between conversion thread and GUI thread
+    convert_progress_signal = pyqtSignal(float, int, int, int, int)
+    status_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str, str)
+    info_signal = pyqtSignal(str, str)
+    finished_signal = pyqtSignal()
+    def __init__(self, parent, boot9_path: str, log_func=print):
+        super().__init__(parent)
+        self.setWindowTitle("转换 3DS/CCI 文件为 CIA")
+        self.setAcceptDrops(True)
+
+        self.boot9_path = boot9_path
+        self.log = log_func
+        self.files_to_convert = []
+        self.is_converting = False
+
+        # Setup layout
+        layout = QVBoxLayout(self)
+
+        # Top: Select file button
+        button_layout = QHBoxLayout()
+        select_button = QPushButton("选择文件")
+        select_button.clicked.connect(self.select_files)
+        button_layout.addWidget(select_button)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+
+        # Center: Drag and drop area with text
+        self.drop_area = QLabel("拖拽文件到此处转换为 CIA")
+        self.drop_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.drop_area.setStyleSheet(
+            "border: 2px dashed #ccc; "
+            "border-radius: 5px; "
+            "padding: 50px; "
+            "color: #666;"
+        )
+        self.drop_area.setMinimumHeight(200)
+        layout.addWidget(self.drop_area)
+        # Bottom: Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+
+        # Progress text
+        self.progress_text = QLabel("")
+        layout.addWidget(self.progress_text)
+
+        # Bottom buttons: only close button is needed; conversion starts automatically
+        button_layout_bottom = QHBoxLayout()
+        button_layout_bottom.addStretch()
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        button_layout_bottom.addWidget(close_button)
+        layout.addLayout(button_layout_bottom)
+
+        # Connect signals to slots so background threads can update GUI safely
+        self.convert_progress_signal.connect(self._update_progress)
+        self.status_signal.connect(self._set_status_text)
+        self.error_signal.connect(self._show_error_message)
+        self.info_signal.connect(self._show_info_message)
+        self.finished_signal.connect(self._on_finished)
+
+    def select_files(self):
+        """Open file dialog to select 3DS/CCI files"""
+        file_filter = "游戏卡镜像 (*.3ds *.cci);;所有文件 (*)"
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择 3DS/CCI 文件",
+            "",
+            file_filter
+        )
+        if file_paths:
+            self.files_to_convert = file_paths
+            # Start conversion immediately after selection
+            self.start_conversion()
+
+    def dragEnterEvent(self, e: QDragEnterEvent):
+        """Handle drag enter event"""
+        if e.mimeData().hasUrls():
+            e.accept()
+            self.drop_area.setStyleSheet(
+                "border: 2px dashed #0078d4; "
+                "border-radius: 5px; "
+                "padding: 50px; "
+                "color: #0078d4;"
+            )
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, e):
+        """Handle drag leave event"""
+        self.drop_area.setStyleSheet(
+            "border: 2px dashed #ccc; "
+            "border-radius: 5px; "
+            "padding: 50px; "
+            "color: #666;"
+        )
+
+    def dropEvent(self, e):
+        """Handle drop event"""
+        self.drop_area.setStyleSheet(
+            "border: 2px dashed #ccc; "
+            "border-radius: 5px; "
+            "padding: 50px; "
+            "color: #666;"
+        )
+
+        urls = e.mimeData().urls()
+        new_files = []
+        for url in urls:
+            path = url.toLocalFile()
+            if isfile(path) and path.lower().endswith(('.3ds', '.cci')):
+                new_files.append(path)
+
+        if new_files:
+            self.files_to_convert.extend(new_files)
+            # Start conversion immediately after drop
+            self.start_conversion()
+
+    def _prepare_conversion_jobs(self):
+        """Pre-check files before starting conversion.
+
+        Returns a list of (file_path, overwrite) tuples for files that can be converted.
+        """
+        conversion_jobs = []
+        skipped_files = 0
+
+        for file_path in list(self.files_to_convert):
+            output_dir = dirname(file_path)
+            if not output_dir or not isdir(output_dir):
+                self.log(f'跳过无法访问的输出目录：{output_dir}')
+                skipped_files += 1
+                continue
+
+            cia_name = join(output_dir, Path(file_path).stem + '.cia')
+            overwrite = False
+
+            if isfile(cia_name):
+                confirm = QMessageBox.question(
+                    self,
+                    "确认覆盖",
+                    f"目标目录中已存在同名 CIA 文件：\n{cia_name}\n\n是否覆盖？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    self.log(f'已跳过同名 CIA：{cia_name}')
+                    skipped_files += 1
+                    continue
+                overwrite = True
+
+            try:
+                required_size = os.path.getsize(file_path)
+                free_space = shutil.disk_usage(output_dir).free
+            except Exception as e:
+                self.log(f'检查空间失败，跳过 {basename(file_path)}：{e}')
+                skipped_files += 1
+                continue
+
+            if required_size > free_space:
+                QMessageBox.warning(
+                    self,
+                    "空间不足",
+                    f"目标目录空间不足，已拒绝转换：\n{file_path}\n\n"
+                    f"所需空间: {format_file_size(required_size)}\n"
+                    f"可用空间: {format_file_size(free_space)}"
+                )
+                self.log(f'空间不足，已拒绝转换：{file_path}')
+                skipped_files += 1
+                continue
+
+            conversion_jobs.append((file_path, overwrite))
+
+        if skipped_files and not conversion_jobs:
+            QMessageBox.information(self, "提示", "没有可转换的文件。")
+        self.files_to_convert.clear()
+        return conversion_jobs
+
+    def start_conversion(self):
+        """Start converting files"""
+        if not self.files_to_convert or self.is_converting:
+            return
+
+        if not self.boot9_path or not isfile(self.boot9_path):
+            # Use signal to show warning on main thread
+            self.error_signal.emit("错误", "boot9.bin 文件路径无效")
+            return
+
+        conversion_jobs = self._prepare_conversion_jobs()
+        if not conversion_jobs:
+            self.is_converting = False
+            self.progress_bar.setValue(0)
+            self.progress_text.setText("没有可转换的文件")
+            return
+
+        self.is_converting = True
+        # prepare UI
+        self.progress_bar.setValue(0)
+        self.progress_text.setText("")
+
+        def conversion_task():
+            total_files = len(conversion_jobs)
+            for idx, (file_path, overwrite) in enumerate(conversion_jobs, 1):
+                try:
+                    # Get the directory of the file for in-place conversion
+                    output_dir = dirname(file_path)
+
+                    # Inform main thread about status
+                    self.log(f'正在转换文件 ({idx}/{total_files}): {basename(file_path)}')
+                    self.status_signal.emit(f"正在转换: {basename(file_path)} ({idx}/{total_files})")
+
+                    # Call converter function
+                    conventer(
+                        log=self.log,
+                        verbose=True,
+                        game=[file_path],
+                        output=output_dir,
+                        overwrite=overwrite,
+                        boot9=self.boot9_path,
+                        ignore_bad_hashes=False,
+                        on_progress=lambda percent, read, size: self.convert_progress_signal.emit(percent, read, size, idx, total_files)
+                    )
+
+                    self.log(f'转换完成: {basename(file_path)}')
+
+                except Exception as e:
+                    self.log(f'转换失败 {basename(file_path)}: {e}')
+                    # Show error in main thread
+                    self.error_signal.emit("转换错误", f"转换 {basename(file_path)} 时出错:\n{str(e)}")
+
+            # Notify main thread that conversion finished
+            self.info_signal.emit("完成", "已转换完成，请检查目录")
+            self.finished_signal.emit()
+            self.log("所有文件转换完成")
+
+        # Run conversion in a separate thread
+        conversion_thread = Thread(target=conversion_task, daemon=True)
+        conversion_thread.start()
+
+    def _update_progress(self, percent, read, size, current_file, total_files):
+        """Update progress bar (called from conversion thread)"""
+        # Calculate overall progress based on files
+        overall_percent = int((current_file - 1 + percent / 100) / total_files * 100)
+        self.progress_bar.setValue(overall_percent)
+
+    def _set_status_text(self, text: str):
+        """Set status text on main thread"""
+        self.progress_text.setText(text)
+
+    def _show_error_message(self, title: str, message: str):
+        """Show an error message box on main thread"""
+        QMessageBox.critical(self, title, message)
+
+    def _show_info_message(self, title: str, message: str):
+        """Show an information message box on main thread"""
+        QMessageBox.information(self, title, message)
+
+    def _on_finished(self):
+        """Finalize UI when conversion finishes (executed on main thread)"""
+        self.is_converting = False
+        self.progress_bar.setValue(100)
+        self.progress_text.setText("转换完成")
+
+
 class InstallSignals(QObject):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(float, int, int)
+    convert_progress_signal = pyqtSignal(float, int, int)
     error_signal = pyqtSignal(Exception)
     cia_start_signal = pyqtSignal(int)
     status_signal = pyqtSignal(str, InstallStatus)
@@ -214,15 +519,27 @@ class AboutDialog(QDialog):
 
         delete_button.clicked.connect(delete_corrupted_files)
 
+        convert_button = QPushButton("转换 3DS / CCI 为 CIA 格式")
+
+        def open_convert_dialog():
+            d = ConvertDialog(self, parent.boot9_path.text(), parent.log)
+            d.show()
+
+        layout.addWidget(convert_button)
+        convert_button.clicked.connect(open_convert_dialog)
+
 
         # Add close button
         close_button = QPushButton("关闭")
+        layout.addWidget(close_button)
         close_button.clicked.connect(self.close)
 
-        # if is_mica_supported():
-        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        #     hwnd = int(self.winId())
-        #     ApplyMica(hwnd, MicaType.MICA)
+                # if is_mica_supported():
+                #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+                #     hwnd = int(self.winId())
+                #     ApplyMica(hwnd, MicaType.MICA)
+
+
 
 
 class ListBoxDialog(QDialog):
@@ -257,6 +574,69 @@ class ListBoxDialog(QDialog):
         #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         #     hwnd = int(self.winId())
         #     ApplyMica(hwnd, MicaType.MICA)
+
+
+class ScrollableErrorDialog(QDialog):
+    def __init__(self, parent, title: str, message: str):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(QSize(500, 300))
+
+        # Setup layout
+        layout = QVBoxLayout(self)
+
+        # Create scrollable text edit
+        self.text_edit = QTextEdit()
+        self.text_edit.setText(message)
+        self.text_edit.setReadOnly(True)
+        layout.addWidget(self.text_edit)
+
+        # Add close button
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        layout.addWidget(close_button)
+
+        # if is_mica_supported():
+        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
+
+
+class PasswordInputDialog(QDialog):
+    """Dialog for inputting password for encrypted archives"""
+    def __init__(self, parent, archive_name: str):
+        super().__init__(parent)
+        self.setWindowTitle("输入压缩包密码")
+        self.setMinimumWidth(400)
+        self.password = None
+
+        layout = QVBoxLayout(self)
+        
+        # Prompt label
+        prompt_label = QLabel(f"压缩包 '{archive_name}' 需要输入密码：")
+        layout.addWidget(prompt_label)
+        
+        # Password input field
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.returnPressed.connect(self.accept)
+        layout.addWidget(self.password_input)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("确定")
+        ok_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+    
+    def accept(self):
+        self.password = self.password_input.text()
+        super().accept()
 
 
 class CustomInstallGUI(QMainWindow):
@@ -331,7 +711,7 @@ class CustomInstallGUI(QMainWindow):
 
         button_layout = QHBoxLayout()
 
-        self.add_cia_button = QPushButton('添加 CIA')
+        self.add_cia_button = QPushButton('添加应用')
         self.add_cia_button.setEnabled(False)
         self.add_cia_button.clicked.connect(self.add_cias)
         button_layout.addWidget(self.add_cia_button)
@@ -341,7 +721,7 @@ class CustomInstallGUI(QMainWindow):
         self.add_cdn_button.clicked.connect(self.add_cdn)
         button_layout.addWidget(self.add_cdn_button)
 
-        self.add_folder_button = QPushButton('添加 CIA 文件夹')
+        self.add_folder_button = QPushButton('添加应用文件夹')
         self.add_folder_button.setEnabled(False)
         self.add_folder_button.clicked.connect(self.add_folder)
         button_layout.addWidget(self.add_folder_button)
@@ -361,12 +741,25 @@ class CustomInstallGUI(QMainWindow):
         # Title list
         self.title_list = QTreeWidget()
         self.title_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.title_list.setHeaderLabels(['图标', '文件路径', '应用 ID', '应用名', '安装状态'])
-        self.title_list.setColumnWidth(0, 50)
+        self.title_list.setIndentation(5)
+        self.title_list.setHeaderLabels(['图标', '文件路径', '应用 ID', '应用名', '应用大小', '安装状态'])
+        self.title_icon_size = QSize(18, 18)
+        self.title_list.setIconSize(self.title_icon_size)
+
+        # Set column resize modes for adaptive width
+        self.title_list.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Icon
+        self.title_list.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # File path
+        self.title_list.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)  # App ID
+        self.title_list.header().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # App name - adaptive
+        self.title_list.header().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # App size
+        self.title_list.header().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Install status
+
+        self.title_list.header().setMinimumSectionSize(self.title_icon_size.width() + 8)
+        self.title_list.setColumnWidth(0, self.title_icon_size.width() + 15)
         self.title_list.setColumnWidth(1, 200)
         self.title_list.setColumnWidth(2, 150)
-        self.title_list.setColumnWidth(3, 300)
-        self.title_list.setColumnWidth(4, 10)
+        self.title_list.setColumnWidth(4, 70)
+        self.title_list.setColumnWidth(5, 10)
         self.splitter.addWidget(self.title_list)
 
         # Log window
@@ -414,8 +807,16 @@ class CustomInstallGUI(QMainWindow):
 
         self.layout.addLayout(control_layout)
 
+        # Status and info layout
+        status_info_layout = QHBoxLayout()
         self.status_label = QLabel()
-        self.layout.addWidget(self.status_label)
+        status_info_layout.addWidget(self.status_label, 1)
+
+        self.info_label = QLabel()
+        self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_info_layout.addWidget(self.info_label, 1)
+
+        self.layout.addLayout(status_info_layout)
 
         # textChanged signals
         self.sd_path.textChanged.connect(self.update_button_states)
@@ -426,6 +827,7 @@ class CustomInstallGUI(QMainWindow):
         # Setup signals
         self.signals.log_signal.connect(self.on_log)
         self.signals.progress_signal.connect(self.on_progress)
+        self.signals.convert_progress_signal.connect(self.on_convert_progress)
         self.signals.error_signal.connect(self.on_error)
         self.signals.cia_start_signal.connect(self.on_cia_start)
         self.signals.status_signal.connect(self.on_status_update)
@@ -449,6 +851,7 @@ class CustomInstallGUI(QMainWindow):
         #     ApplyMica(hwnd, MicaType.MICA)
 
         self.force_install = False
+        self.skip_game_card_confirm = False
         self.total_items = 0
         self.finished_percent = 0
         self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
@@ -464,7 +867,10 @@ class CustomInstallGUI(QMainWindow):
         self.dialog.setFixedSize(self.dialog.size())
 
     def select_sd_root(self):
-        directory = QFileDialog.getExistingDirectoryUrl(self, "选择 SD 卡根目录", QUrl("clsid:0AC0837C-BBF8-452A-850D-79D08E667CA7"))
+        qurl = QUrl.fromLocalFile(str(Path.home()))
+        if is_windows:
+            qurl = QUrl("clsid:0AC0837C-BBF8-452A-850D-79D08E667CA7")
+        directory = QFileDialog.getExistingDirectoryUrl(self, "选择 SD 卡根目录", qurl)
         directory = directory.toLocalFile() if directory else None
         if directory:
             cifinish_path = join(directory, 'cifinish.bin')
@@ -531,10 +937,11 @@ class CustomInstallGUI(QMainWindow):
             error_text = "无法添加以下文件：\n\n"
             for path, reason in failed.items():
                 error_text += f"{basename(path)}: {reason}\n"
-            QMessageBox.warning(self, "无法添加应用", error_text)
+            dialog = ScrollableErrorDialog(self, "无法添加应用", error_text)
+            dialog.exec()
 
     def add_cias(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择 CIA 文件", "", "应用文件 (*.cia *.3ds *.cci)")
+        files, _ = QFileDialog.getOpenFileNames(self, "选择应用文件", "", "应用文件 (*.cia *.3ds *.cci *.zip *.7z *.rar)")
         if files:
             self._add_cias(files)
 
@@ -562,19 +969,33 @@ class CustomInstallGUI(QMainWindow):
                         success, reason = self.add_cia(str(file_path))
                         if not success:
                             failed[file_path] = reason
+                            if delete:
+                                self.log("无法添加文件 " + file_path + "，正在删除...")
+                                os.remove(file_path)
+                                self.log("已删除：" + file_path)
+                                _p = Path(file_path)
+                                if _p.parent.exists():
+                                    if not any(_p.parent.iterdir()) and _p.parent.name.startswith('ci-install-temp'):
+                                        _pp = str(_p.parent).replace("\\", "/")
+                                        self.log(f'目录 {_pp} 为空，尝试删除...')
+                                        _p.parent.rmdir()
+                                        self.log(f'已删除空目录：{_pp}')
                         else:
                             if delete:
                                 self.pending_remove.append(str(file_path))
                     if file_path.lower().endswith('.3ds') or file_path.lower().endswith('.cci'):
                         self.add_game_card_image(str(file_path))
+                        if delete:
+                            self.pending_remove.append(str(file_path))
             if failed:
-                error_text = "无法添加以下文件：\n\n"
+                error_text = ["无法添加以下文件：\n"]
                 for path, reason in failed.items():
-                    error_text += f"{basename(path)}: {reason}\n"
-                QMessageBox.warning(self, "添加软件失败", error_text)
+                    error_text += [f"{basename(path)}: {reason}\n"]
+                dialog = ScrollableErrorDialog(self, "添加软件失败", "\n".join(error_text))
+                dialog.exec()
 
     def add_folder(self):
-        directory, _ = QFileDialog.getOpenFileName(self, "选择包含了 CIA 文件的文件夹", "", "应用文件 (*.cia *.3ds *.cci)")
+        directory, _ = QFileDialog.getOpenFileName(self, "选择包含了应用文件的文件夹", "", "应用文件 (*.cia *.3ds *.cci)")
         _dir = str(Path(directory).parent)
         self._add_folder(_dir)
 
@@ -605,10 +1026,243 @@ class CustomInstallGUI(QMainWindow):
                         self.log(f'无法删除目录 {path}：{e}')
             else:
                 self.log(f'待删除列表中不包含 {path}，无需执行任何操作。')
+        self.update_info_label()
+
+    def add_compressed_file(self, path: str) -> Tuple[bool, str]:
+        """
+        处理压缩文件（zip、7z、rar等）
+        先处理并验证密码，再检查压缩包内是否存在.cia/.3ds/.cci文件
+        解压到临时文件夹并传递给_add_folder
+        """
+        try:
+            path = path.replace('\\', '/')
+            self.log(f'开始处理压缩文件：{path}')
+
+            confirm = QMessageBox.question(
+                self,
+                '确认解压',
+                f'检测到压缩文件：\n{path}\n\n是否现在解压？',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                self.log(f'已跳过压缩文件：{path}')
+                return True, ''
+
+            # 确定压缩文件类型
+            file_ext = path.lower().split('.')[-1]
+            archive = None
+            file_list = []
+            requires_password = False
+
+            if file_ext == 'zip':
+                try:
+                    with zipfile.ZipFile(path, 'r') as probe_archive:
+                        # ZIP 可直接从标志位判断文件是否加密
+                        requires_password = any(
+                            (info.flag_bits & 0x1) and not info.is_dir()
+                            for info in probe_archive.infolist()
+                        )
+                except Exception as e:
+                    return False, f'无法读取 ZIP 文件：{e}'
+
+            elif file_ext == '7z':
+                if py7zr is None:
+                    return False, '不支持 7z 格式，请安装 py7zr 库'
+                try:
+                    with py7zr.SevenZipFile(path, 'r') as probe_archive:
+                        # 新版本 py7zr 提供 needs_password()，旧版本退化为探测读取目录
+                        if hasattr(probe_archive, 'needs_password'):
+                            requires_password = bool(probe_archive.needs_password())
+                        else:
+                            try:
+                                probe_archive.getnames()
+                                requires_password = False
+                            except Exception:
+                                requires_password = True
+                except Exception as e:
+                    return False, f'无法读取 7z 文件：{e}'
+
+            elif file_ext == 'rar':
+                if rarfile is None:
+                    return False, '不支持 RAR 格式，请安装 rarfile 库'
+                try:
+                    with rarfile.RarFile(path, 'r') as probe_archive:
+                        file_infos = [info for info in probe_archive.infolist() if not info.isdir()]
+                        requires_password = any(info.needs_password() for info in file_infos)
+                except Exception as e:
+                    return False, f'无法读取 RAR 文件：{e}'
+            else:
+                return False, f'不支持的压缩格式：{file_ext}'
+
+            # 先处理密码输入
+            password = None
+            if requires_password:
+                password_dialog = PasswordInputDialog(self, basename(path))
+                if password_dialog.exec() != QDialog.DialogCode.Accepted:
+                    return False, '用户取消了操作'
+                password = password_dialog.password
+
+            # 先验证密码可用，再获取文件列表
+            try:
+                self.switch_button_states(False)
+                if file_ext == 'zip':
+                    archive = zipfile.ZipFile(path, 'r')
+                    file_list = archive.namelist()
+
+                    if requires_password:
+                        encrypted_files = [
+                            info.filename
+                            for info in archive.infolist()
+                            if (info.flag_bits & 0x1) and not info.is_dir()
+                        ]
+                        if encrypted_files:
+                            if not password:
+                                return False, '压缩包需要密码'
+                            try:
+                                with archive.open(encrypted_files[0], pwd=password.encode('utf-8')) as f:
+                                    f.read(1)
+                            except RuntimeError as e:
+                                return False, f'密码错误或 ZIP 文件损坏：{e}'
+
+                elif file_ext == '7z':
+                    archive = py7zr.SevenZipFile(path, 'r', password=password or None)
+                    file_list = archive.getnames()
+
+                    if requires_password and not password:
+                        return False, '压缩包需要密码'
+
+                    first_file = next((f for f in file_list if not f.endswith('/')), None)
+                    if first_file:
+                        with tempfile.TemporaryDirectory(prefix='ci-7z-check-') as check_dir:
+                            archive.reset()
+                            archive.extract(path=check_dir, targets=[first_file])
+
+                elif file_ext == 'rar':
+                    archive = rarfile.RarFile(path, 'r')
+                    file_list = archive.namelist()
+
+                    if requires_password and not password:
+                        return False, '压缩包需要密码'
+
+                    first_file = next((f for f in file_list if not f.endswith('/')), None)
+                    if first_file:
+                        try:
+                            with archive.open(first_file, 'r', pwd=password):
+                                pass
+                        except Exception as e:
+                            return False, f'密码错误或 RAR 文件损坏：{e}'
+
+            except Exception as e:
+                return False, f'无法验证压缩包密码或读取文件列表：{e}'
+
+            finally:
+                self.switch_button_states(True)
+                if archive:
+                    archive.close()
+
+            # 在密码验证通过后，再检查压缩包内是否存在符合格式的文件
+            valid_files = [f for f in file_list if f.lower().endswith(('.cia', '.3ds', '.cci'))]
+            if not valid_files:
+                return False, '压缩包内没有找到 .cia/.3ds/.cci 文件'
+
+            self.log(f'找到 {len(valid_files)} 个符合格式的文件')
+
+            # 创建临时文件夹
+            timestamp = str(int(time() * 1000))
+            temp_dir = join(dirname(abspath(__file__)), f'ci-install-temp-{timestamp}')
+
+            previous_add_cia_state = self.add_cia_button.isEnabled()
+
+            def update_extract_progress(current: int, total: int, text: str = '解压中'):
+                total = max(total, 1)
+                percent = int(current / total * 100)
+                self.progress_bar.setValue(percent)
+                self.progress_bar_text.setText(f'{text}: {current}/{total} ({percent}%)')
+                QApplication.processEvents()
+
+            try:
+                os.makedirs(temp_dir, exist_ok=True)
+                self.log(f'创建临时目录：{temp_dir}')
+            except Exception as e:
+                return False, f'无法创建临时目录：{e}'
+
+            # 解压文件
+            try:
+                self.switch_button_states(False)
+                QApplication.processEvents()
+
+                if file_ext == 'zip':
+                    with zipfile.AESZipFile(path, 'r') as archive:
+                        members = [info for info in archive.infolist() if not info.is_dir()]
+                        total_members = len(members)
+                        for index, info in enumerate(members, 1):
+                            if password:
+                                archive.extract(info, path=temp_dir, pwd=password.encode('utf-8'))
+                            else:
+                                archive.extract(info, path=temp_dir)
+                            update_extract_progress(index, total_members)
+
+                elif file_ext == '7z':
+                    with py7zr.SevenZipFile(path, 'r', password=password or None) as archive:
+                        members = [name for name in archive.getnames() if not name.endswith('/')]
+                        total_members = len(members)
+                        for index, member in enumerate(members, 1):
+                            archive.extract(path=temp_dir, targets=[member])
+                            update_extract_progress(index, total_members)
+
+                elif file_ext == 'rar':
+                    with rarfile.RarFile(path, 'r') as archive:
+                        members = [info for info in archive.infolist() if not info.isdir()]
+                        total_members = len(members)
+                        for index, info in enumerate(members, 1):
+                            archive.extract(info, path=temp_dir, pwd=password if password else None)
+                            update_extract_progress(index, total_members)
+
+                self.log(f'已解压到临时目录：{temp_dir}')
+
+            except (RuntimeError, EOFError) as e:
+                # 清理临时目录
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                return False, f'解压失败，可能密码错误或文件损坏：{e}'
+
+            except Exception as e:
+                # 清理临时目录
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                return False, f'解压失败：{e}'
+
+            finally:
+                self.progress_bar.setValue(0)
+                self.progress_bar_text.setText('')
+                QApplication.processEvents()
+                self.switch_button_states(True)
+
+            # 将解压后的文件夹传递给_add_folder，并设置delete=True以便处理完后删除
+            self.log('将临时目录中的文件添加到列表...')
+            self._add_folder(temp_dir, delete=True)
+
+            return True, ''
+
+        except Exception as e:
+            self.log(f'处理压缩文件时出错：{e}')
+            traceback.print_exc()
+            return False, f'处理压缩文件时出错：{e}'
 
     def add_cia(self, path: str) -> Tuple[bool, str]:
         try:
             path = path.replace('\\', '/')
+            
+            # 检查是否是压缩文件
+            compressed_extensions = ('.zip', '.7z', '.rar')
+            if path.lower().endswith(compressed_extensions):
+                return self.add_compressed_file(path)
+            
             if path.lower().endswith('.3ds') or path.lower().endswith('.cci'):
                 return self.add_game_card_image(path)
             with self.lock:
@@ -620,10 +1274,14 @@ class CustomInstallGUI(QMainWindow):
                 else:
                     reader = CDNReader(path)
 
-                self.readers[path] = reader
 
                 if reader.tmd.title_id.startswith('00048'):
                     return False, '不支持 DSiWare 应用'
+
+                if self.title_list.findItems(reader.tmd.title_id, Qt.MatchFlag.MatchExactly, column=2):
+                    return False, '应用已添加在列表中'
+
+                self.readers[path] = reader
 
                 # Get title name
                 try:
@@ -654,23 +1312,53 @@ class CustomInstallGUI(QMainWindow):
                     traceback.print_exc()
                     cover_art_pixmap = QPixmap()  # Empty pixmap if no cover art
 
+                title_size = get_install_size(reader)
+
+                # Check if adding this CIA would exceed available SD card capacity
+                sd_path = self.sd_path.text()
+                if sd_path and isdir(sd_path):
+                    try:
+                        usage = shutil.disk_usage(sd_path)
+                        free_space = usage.free
+                        total_app_size = self.get_total_app_size()
+                        new_total_size = total_app_size + title_size
+
+                        if new_total_size > free_space:
+                            # Remove reader from the dictionary before rejecting
+                            del self.readers[path]
+                            error_msg = (f'SD 卡可用容量不足！\n\n'
+                                       f'待添加应用大小: {format_file_size(title_size)}\n'
+                                       f'SD 卡可用容量: {format_file_size(free_space)}\n\n'
+                                       f'缺少空间: {format_file_size(new_total_size - free_space)}')
+                            return False, error_msg
+                    except Exception as e:
+                        self.log(f'检查 SD 卡容量失败: {e}')
+
                 item = QTreeWidgetItem([
                     '',
                     path,
                     str(reader.tmd.title_id).upper(),
                     title_name,
+                    format_file_size(title_size),
                     statuses.get(InstallStatus.Waiting)
                 ])
 
-                # Set icon if available
-                if not pixmap.isNull():
-                    item.setIcon(0, QIcon(pixmap))
-
-                # Set cover art if available
-                if not cover_art_pixmap.isNull():
-                    item.setIcon(0, QIcon(cover_art_pixmap))
-
                 self.title_list.addTopLevelItem(item)
+
+                display_pixmap = cover_art_pixmap if not cover_art_pixmap.isNull() else pixmap
+                if not display_pixmap.isNull():
+                    scaled_pixmap = display_pixmap.scaled(
+                        self.title_icon_size,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    icon_label = QLabel()
+                    icon_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    icon_label.setPixmap(scaled_pixmap)
+                    icon_label.setStyleSheet('background: transparent; border: none;')
+                    icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    self.title_list.setItemWidget(item, 0, icon_label)
+                self.update_info_label()
                 return True, ''
 
         except CIAError as e:
@@ -687,16 +1375,47 @@ class CustomInstallGUI(QMainWindow):
         try:
             with self.lock:
                 path = path.replace('\\', '/')
-                info = QMessageBox.question(self, "添加游戏卡镜像", f"{path} 是一个游戏卡镜像文件。\n"
-                                                                f"本工具可以帮你预先转换好文件为 CIA 格式，但这需要一点时间转换。\n"
-                                                                f"是否继续？", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if info == QMessageBox.StandardButton.No:
-                    self.log('取消添加游戏卡镜像：' + path)
-                    return
+                if not self.skip_game_card_confirm:
+                    info = QMessageBox(self)
+                    info.setWindowTitle("添加游戏卡镜像")
+                    info.setText(f"{path} 是一个游戏卡镜像文件。\n"
+                                 f"本工具可以帮你预先转换好文件为 CIA 格式，但这需要一点时间转换。\n"
+                                 f"是否继续？")
+                    yes_button = info.addButton("是", QMessageBox.ButtonRole.YesRole)
+                    all_yes_button = info.addButton("全是（本次安装）", QMessageBox.ButtonRole.YesRole)
+                    no_button = info.addButton("否", QMessageBox.ButtonRole.NoRole)
+                    info.setDefaultButton(yes_button)
+                    info.exec()
+
+                    clicked_button = info.clickedButton()
+                    if clicked_button == no_button:
+                        self.log('取消添加游戏卡镜像：' + path)
+                        return
+                    if clicked_button == all_yes_button:
+                        self.skip_game_card_confirm = True
                 self.switch_button_states(False)
                 changed_button = True
-                timestamp = datetime.now().strftime('%H-%M-%S')
+                timestamp = str(int(time() * 1000))
                 tmp_dir = str(Path(file_parent) / f'ci-install-temp-{timestamp}').replace('\\', '/')
+                # Check free space on the drive where the temp folder will be created.
+                try:
+                    # Determine the drive/root for the tmp_dir (works on Windows and POSIX)
+                    drive_root = Path(tmp_dir).anchor or Path(tmp_dir).drive or tmp_dir
+                    # Estimate required space as the size of the source game card image
+                    required_size = os.path.getsize(path) if isfile(path) else 0
+                    usage = shutil.disk_usage(drive_root)
+                    free_space = usage.free
+                    if required_size > free_space:
+                        # Alert the user and abort adding this game card image
+                        msg = (f'临时目录所在磁盘可用容量不足，无法在此处转换文件。\n\n'
+                               f'源文件大小: {format_file_size(required_size)}\n'
+                               f'可用空间: {format_file_size(free_space)}\n\n'
+                               f'请清理磁盘或选择其他位置启动程序后重试。')
+                        self.log('取消转换游戏卡镜像，磁盘空间不足：' + path)
+                        return False, msg
+                except Exception as e:
+                    # If we cannot determine disk usage for any reason, log and continue.
+                    self.log(f'检查临时目录磁盘容量失败: {e}')
                 os.makedirs(tmp_dir, exist_ok=True)
                 self.log(f'正在转换游戏卡镜像 {path} 为 CIA 格式...')
                 conventer(log=self.log,
@@ -704,8 +1423,10 @@ class CustomInstallGUI(QMainWindow):
                           game=[path],
                           output=tmp_dir,
                           boot9=self.boot9_path.text(),
-                          ignore_bad_hashes=self.force_install)
+                          ignore_bad_hashes=self.force_install,
+                          on_progress=lambda percent, read, size: self.signals.convert_progress_signal.emit(percent, read, size))
             self.log(f'转换完成，已缓存到 {tmp_dir}。正在添加到列表中...')
+
             self._add_folder(tmp_dir, delete=True)
             self.log(f'将缓存文件添加到待删除列表。')
         except Exception as e:
@@ -713,18 +1434,19 @@ class CustomInstallGUI(QMainWindow):
             self.log(traceback.format_exc())
             return False, str(e)
         finally:
+            self.progress_bar.reset()
+            self.progress_bar_text.setText("")
             if changed_button:
                 self.switch_button_states(True)
         return True, ''
 
     # Drag and drop support
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasText() and self.add_cia_button.isEnabled():
-            e.accept()
-        else:
-            e.ignore()
+    def dragEnterEvent(self, e: QDragEnterEvent):
+        e.accept()
 
     def dropEvent(self, e):
+        if not (e.mimeData().hasText() and self.add_cia_button.isEnabled()):
+            return QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
         filePathList = e.mimeData().text()
         filePath = filePathList.split('\n')
         cias = []
@@ -737,6 +1459,8 @@ class CustomInstallGUI(QMainWindow):
                     cias.append(p)
                 if p.lower().endswith('.3ds') or p.lower().endswith('.cci'):
                     cards.append(p)
+                if p.lower().endswith(".zip") or p.lower().endswith(".7z") or p.lower().endswith(".rar"):
+                    cias.append(p)
             elif p and isdir(p):
                 dirs.append(p)
         if cias:
@@ -769,6 +1493,33 @@ class CustomInstallGUI(QMainWindow):
         self.remove_button.setEnabled(enabled)
         self.start_button.setEnabled(enabled)
 
+    def get_total_app_size(self) -> int:
+        """Calculate total size of all applications in the list."""
+        total_size = 0
+        for i in range(self.title_list.topLevelItemCount()):
+            item = self.title_list.topLevelItem(i)
+            path = item.text(1)
+            if path in self.readers:
+                try:
+                    total_size += get_install_size(self.readers[path])
+                except:
+                    pass
+        return total_size
+
+    def update_info_label(self):
+        """Update the info label with SD path info and total application size."""
+        sd_path = self.sd_path.text()
+        total_str, free_str = get_disk_info(sd_path, self.log)
+
+        total_app_size = self.get_total_app_size()
+        app_size_str = format_file_size(total_app_size)
+
+        if total_str and free_str:
+            info_text = f'SD 卡总大小: {total_str} | 可用容量: {free_str} | 列表应用总大小: {app_size_str}'
+        else:
+            info_text = f'列表应用总大小: {app_size_str}'
+
+        self.info_label.setText(info_text)
 
     def _update_button_states(self):
         self.enabled_button = all([self.check_b9_loaded(),
@@ -777,9 +1528,10 @@ class CustomInstallGUI(QMainWindow):
                        self.seeddb_path.text()])
 
         self.switch_button_states(self.enabled_button)
+        self.update_info_label()
 
         if self.enabled_button:
-            self.status_label.setText('就绪。（可拖拽文件或文件夹至窗口添加 CIA）')
+            self.status_label.setText('就绪，可拖拽文件或文件夹至窗口添加应用（*.cia / *.3ds / *.cci）')
         else:
             self.status_label.setText('请选择 SD 卡根目录及 movable.sed。')
         return self.enabled_button
@@ -827,6 +1579,13 @@ class CustomInstallGUI(QMainWindow):
         if taskbar:
             max_percentage = 100 * self.total_items
             taskbar.SetProgressValue(int(self.winId()), int(total_percent + self.finished_percent), max_percentage)
+
+    def on_convert_progress(self, percent: float, read: int, size: int):
+        """处理转换进度"""
+        self.progress_bar.setValue(int(percent))
+        self.progress_bar_text.setText(f"转换进度: {percent:.1f}% ({read} / {size})")
+        if taskbar:
+            taskbar.SetProgressValue(int(self.winId()), int(percent), 100)
 
     def on_error(self, exc: Exception):
         self.log(f'错误：{exc}')
@@ -983,6 +1742,7 @@ class CustomInstallGUI(QMainWindow):
             self.switch_button_states(True)
             self.progress_bar_text.setText('')
             self.progress_bar.reset()
+            self.skip_game_card_confirm = False
 
             if taskbar:
                 taskbar.SetProgressState(int(self.winId()), tbl.TBPF_NOPROGRESS)

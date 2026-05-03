@@ -12,7 +12,7 @@ from enum import Enum
 from glob import glob
 import gzip
 from os import makedirs, rename, scandir
-from os.path import dirname, join, isdir, isfile
+from os.path import dirname, join, isdir, isfile, exists
 from random import randint
 from hashlib import sha256
 from pprint import pformat
@@ -53,9 +53,9 @@ CI_VERSION = '2.1'
 frozen = getattr(sys, 'frozen', False)
 script_dir: str
 if frozen:
-    script_dir = dirname(executable)
+    script_dir = dirname(executable).replace('\\', '/')
 else:
-    script_dir = dirname(__file__)
+    script_dir = dirname(__file__).replace('\\', '/')
 
 # missing contents are replaced with 0xFFFFFFFF in the cmd file
 CMD_MISSING = b'\xff\xff\xff\xff'
@@ -391,276 +391,290 @@ class CustomInstall:
 
             # Now loop through all provided cia files
             for idx, info in enumerate(self.readers):
-                cia, path = info
-
-                self.event.on_cia_start(idx)
-                self.event.update_status(path, InstallStatus.Starting)
-
-                temp_title_root = join(self.sd, f'ci-install-temp-{cia.tmd.title_id}-{randint(0, 0xFFFFFFFF):08x}')
-                makedirs(temp_title_root, exist_ok=True)
-
-                tid_parts = (cia.tmd.title_id[0:8], cia.tmd.title_id[8:16])
-
+                temp_title_root = None
+                title_root = None
                 try:
-                    display_title = f'{cia.contents[0].exefs.icon.get_app_title().short_desc} - {cia.tmd.title_id}'
-                except:
-                    display_title = cia.tmd.title_id
-                self.log(f'安装 {display_title} 中...')
+                    cia, path = info
 
-                title_size = get_install_size(cia)
+                    self.event.on_cia_start(idx)
+                    self.event.update_status(path, InstallStatus.Starting)
 
-                # checks if this is dlc, which has some differences
-                is_dlc = tid_parts[0] == '0004008c'
+                    temp_title_root = join(self.sd, f'ci-install-temp-{cia.tmd.title_id}-{randint(0, 0xFFFFFFFF):08x}')
+                    makedirs(temp_title_root, exist_ok=True)
 
-                # this checks if it has a manual (index 1) and is not DLC
-                has_manual = (not is_dlc) and (1 in cia.contents)
+                    tid_parts = (cia.tmd.title_id[0:8], cia.tmd.title_id[8:16])
 
-                # this gets the extdata id from the extheader, stored in the storage info area
-                try:
-                    with cia.contents[0].open_raw_section(NCCHSection.ExtendedHeader) as e:
-                        e.seek(0x200 + 0x30)
-                        extdata_id = e.read(8)
-                except KeyError:
-                    # not an executable title
-                    extdata_id = b'\0' * 8
-
-                # cmd content id, starts with 1 for non-dlc contents
-                cmd_id = len(cia.content_info) if is_dlc else 1
-                cmd_filename = f'{cmd_id:08x}.cmd'
-
-                # this is where the final directory will be moved
-                tidhigh_root = join(sd_path, 'title', tid_parts[0])
-                falisafe_root = join('/ci-pending/', tidhigh_root)
-                # get the title root where all the contents will be
-
-                title_root = join(sd_path, 'title', *tid_parts)
-                falisafe_title_root = join('/ci-pending/', title_root)
-
-                content_root = join(title_root, 'content')
-                # generate the path used for the IV
-                title_root_cmd = f'/title/{"/".join(tid_parts)}'
-                content_root_cmd = title_root_cmd + '/content'
-
-                temp_content_root = join(temp_title_root, 'content')
-
-                if not self.skip_contents:
-                    self.event.update_status(path, InstallStatus.Writing)
-                    makedirs(join(temp_content_root, 'cmd'), exist_ok=True)
-                    if cia.tmd.save_size:
-                        makedirs(join(temp_title_root, 'data'), exist_ok=True)
-                    if is_dlc:
-                        # create the separate directories for every 256 contents
-                        for x in range(((len(cia.content_info) - 1) // 256) + 1):
-                            makedirs(join(temp_content_root, f'{x:08x}'), exist_ok=True)
-
-                    # maybe this will be changed in the future
-                    tmd_id = 0
-
-                    tmd_filename = f'{tmd_id:08x}.tmd'
-
-                    # write the tmd
-                    tmd_enc_path = content_root_cmd + '/' + tmd_filename
-                    self.log(f'写入 {tmd_enc_path} 中...')
-                    with open(join(temp_content_root, tmd_filename), 'wb') as o:
-                        with self.crypto.create_ctr_io(Keyslot.SD, o, self.crypto.sd_path_to_iv(tmd_enc_path)) as e:
-                            e.write(bytes(cia.tmd))
-
-                    # in case the contents are corrupted
-
-                    do_continue = False
-                    # write each content
-                    for co in cia.content_info:
-                        content_filename = co.id + '.app'
-                        if is_dlc:
-                            dir_index = format((co.cindex // 256), '08x')
-                            content_enc_path = content_root_cmd + f'/{dir_index}/{content_filename}'
-                            content_out_path = join(temp_content_root, dir_index, content_filename)
-                        else:
-                            content_enc_path = content_root_cmd + '/' + content_filename
-                            content_out_path = join(temp_content_root, content_filename)
-                        self.log(f'写入 {content_enc_path} 中...')
-                        with cia.open_raw_section(co.cindex) as s, open(content_out_path, 'wb') as o:
-                            result_hash = self.copy_with_progress(s, o, co.size, content_enc_path)
-                        if result_hash != co.hash:
-                            self.log(f'警告：{content_enc_path} 的哈希值不匹配，CIA 文件可能已损坏！')
-                            if not self.force_install:
-                                install_state['failed'].append(display_title)
-                                shutil.rmtree(temp_title_root)
-                                self.log(f'{content_enc_path} 安装失败，已删除临时文件夹。')
-                                do_continue = True
-                                self.event.update_status(path, InstallStatus.Failed)
-                                break
-                            else:
-                                self.log("警告：强制安装已启用，将继续安装。这可能会导致安装的内容无法正常工作。")
-
-                    if do_continue:
-                        continue
-
-                    # generate a blank save
-                    if cia.tmd.save_size:
-                        sav_enc_path = title_root_cmd + '/data/00000001.sav'
-                        tmp_sav_out_path = join(temp_title_root, 'data', '00000001.sav')
-                        sav_out_path = join(title_root, 'data', '00000001.sav')
-                        if self.overwrite_saves or not isfile(sav_out_path):
-                            cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(sav_enc_path))
-                            # in a new save, the first 0x20 are all 00s. the rest can be random
-                            data = cipher.encrypt(b'\0' * 0x20)
-                            self.log(f'正在 {sav_enc_path} 生成空白存档中...')
-                            with open(tmp_sav_out_path, 'wb') as o:
-                                o.write(data)
-                                o.write(b'\0' * (cia.tmd.save_size - 0x20))
-                        else:
-                            self.log(f'正在从 {sav_enc_path} 复制原先的存档中...')
-                            copy2(sav_out_path, tmp_sav_out_path)
-
-                    # generate and write cmd
-                    cmd_enc_path = content_root_cmd + '/cmd/' + cmd_filename
-                    cmd_out_path = join(temp_content_root, 'cmd', cmd_filename)
-                    self.log(f'生成 {cmd_enc_path} 中')
-                    highest_index = 0
-                    content_ids = {}
-
-                    for record in cia.content_info:
-                        highest_index = record.cindex
-                        with cia.open_raw_section(record.cindex) as s:
-                            s.seek(0x100)
-                            cmac_data = s.read(0x100)
-
-                        id_bytes = bytes.fromhex(record.id)[::-1]
-                        cmac_data += record.cindex.to_bytes(4, 'little') + id_bytes
-
-                        cmac_ncch = crypto.create_cmac_object(Keyslot.CMACSDNAND)
-                        cmac_ncch.update(sha256(cmac_data).digest())
-                        content_ids[record.cindex] = (id_bytes, cmac_ncch.digest())
-
-                    # add content IDs up to the last one
-                    ids_by_index = [CMD_MISSING] * (highest_index + 1)
-                    installed_ids = []
-                    cmacs = []
-                    for x in range(len(ids_by_index)):
-                        try:
-                            info = content_ids[x]
-                        except KeyError:
-                            # "MISSING CONTENT!"
-                            # The 3DS does generate a cmac for missing contents, but I don't know how it works.
-                            # It doesn't matter anyway, the title seems to be fully functional.
-                            cmacs.append(bytes.fromhex('4D495353494E4720434F4E54454E5421'))
-                        else:
-                            ids_by_index[x] = info[0]
-                            cmacs.append(info[1])
-                            installed_ids.append(info[0])
-                    installed_ids.sort(key=lambda x: int.from_bytes(x, 'little'))
-
-                    final = (cmd_id.to_bytes(4, 'little')
-                             + len(ids_by_index).to_bytes(4, 'little')
-                             + len(installed_ids).to_bytes(4, 'little')
-                             + (1).to_bytes(4, 'little'))
-                    cmac_cmd_header = crypto.create_cmac_object(Keyslot.CMACSDNAND)
-                    cmac_cmd_header.update(final)
-                    final += cmac_cmd_header.digest()
-
-                    final += b''.join(ids_by_index)
-                    final += b''.join(installed_ids)
-                    final += b''.join(cmacs)
-
-                    cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(cmd_enc_path))
-                    self.log(f'写入 {cmd_enc_path} 中')
-                    with open(cmd_out_path, 'wb') as o:
-                        o.write(cipher.encrypt(final))
-
-                # this starts building the title info entry
-                title_info_entry_data = [
-                    # title size
-                    title_size.to_bytes(8, 'little'),
-                    # title type, seems to usually be 0x40
-                    0x40.to_bytes(4, 'little'),
-                    # title version
-                    int(cia.tmd.title_version).to_bytes(2, 'little'),
-                    # ncch version
-                    cia.contents[0].version.to_bytes(2, 'little'),
-                    # flags_0, only checking if there is a manual
-                    (1 if has_manual else 0).to_bytes(4, 'little'),
-                    # tmd content id, always starting with 0
-                    (0).to_bytes(4, 'little'),
-                    # cmd content id
-                    cmd_id.to_bytes(4, 'little'),
-                    # flags_1, only checking save data
-                    (1 if cia.tmd.save_size else 0).to_bytes(4, 'little'),
-                    # extdataid low
-                    extdata_id[0:4],
-                    # reserved
-                    b'\0' * 4,
-                    # flags_2, only using a common value
-                    0x100000000.to_bytes(8, 'little'),
-                    # product code
-                    cia.contents[0].product_code.encode('ascii').ljust(0x10, b'\0'),
-                    # reserved
-                    b'\0' * 0x10,
-                    # unknown
-                    randint(0, 0xFFFFFFFF).to_bytes(4, 'little'),
-                    # reserved
-                    b'\0' * 0x2c
-                ]
-
-                def remove_readonly(func, path, _):
-                    "Clear the readonly bit and reattempt the removal"
-                    os.chmod(path, stat.S_IWRITE)
-                    func(path)
-
-                self.event.update_status(path, InstallStatus.Finishing)
-                if isdir(title_root):
-                    self.log(f'正在从 {title_root} 移除原先的安装的文件中...')
-                    rmtree(title_root, onerror=remove_readonly)
-
-                warning = False
-                try:
-                    makedirs(tidhigh_root, exist_ok=True)
-                    rename(temp_title_root, title_root)
-                except:
-                    self.log(f'无法将 {temp_title_root} 重命名为 {title_root}，请检查 SD 卡是否已满或损坏。')
-                    self.log(traceback.format_exc())
-                    self.log(f'尝试将 {temp_title_root} 重命名为 {falisafe_root} 中...')
-                    self.log('如果重命名成功，后续尝试点击 “关于” -> “恢复未安装成功的应用” 处恢复应用。')
                     try:
-                        makedirs(falisafe_root, exist_ok=True)
-                        rename(temp_title_root, falisafe_title_root)
-                        warning = True
-                        self.log(f'已将 {temp_title_root} 重命名为 {falisafe_root}，请稍后尝试恢复应用。')
+                        display_title = f'{cia.contents[0].exefs.icon.get_app_title().short_desc} - {cia.tmd.title_id}'
                     except:
-                        self.log(f'无法将 {temp_title_root} 重命名为 {falisafe_root}，请检查 SD 卡是否已满或损坏。')
+                        display_title = cia.tmd.title_id
+                    self.log(f'安装 {display_title} 中...')
+
+                    title_size = get_install_size(cia)
+
+                    # checks if this is dlc, which has some differences
+                    is_dlc = tid_parts[0] == '0004008c'
+
+                    # this checks if it has a manual (index 1) and is not DLC
+                    has_manual = (not is_dlc) and (1 in cia.contents)
+
+                    # this gets the extdata id from the extheader, stored in the storage info area
+                    try:
+                        with cia.contents[0].open_raw_section(NCCHSection.ExtendedHeader) as e:
+                            e.seek(0x200 + 0x30)
+                            extdata_id = e.read(8)
+                    except KeyError:
+                        # not an executable title
+                        extdata_id = b'\0' * 8
+
+                    # cmd content id, starts with 1 for non-dlc contents
+                    cmd_id = len(cia.content_info) if is_dlc else 1
+                    cmd_filename = f'{cmd_id:08x}.cmd'
+
+                    # this is where the final directory will be moved
+                    tidhigh_root = join(sd_path, 'title', tid_parts[0]).replace('\\', '/')
+                    falisafe_root = join('/ci-pending/', tidhigh_root)
+                    # get the title root where all the contents will be
+
+                    title_root = join(sd_path, 'title', *tid_parts).replace('\\', '/')
+                    falisafe_title_root = join('/ci-pending/', title_root)
+
+                    content_root = join(title_root, 'content')
+                    # generate the path used for the IV
+                    title_root_cmd = f'/title/{"/".join(tid_parts)}'
+                    content_root_cmd = title_root_cmd + '/content'
+
+                    temp_content_root = join(temp_title_root, 'content')
+
+                    if not self.skip_contents:
+                        self.event.update_status(path, InstallStatus.Writing)
+                        makedirs(join(temp_content_root, 'cmd'), exist_ok=True)
+                        if cia.tmd.save_size:
+                            makedirs(join(temp_title_root, 'data'), exist_ok=True)
+                        if is_dlc:
+                            # create the separate directories for every 256 contents
+                            for x in range(((len(cia.content_info) - 1) // 256) + 1):
+                                makedirs(join(temp_content_root, f'{x:08x}'), exist_ok=True)
+
+                        # maybe this will be changed in the future
+                        tmd_id = 0
+
+                        tmd_filename = f'{tmd_id:08x}.tmd'
+
+                        # write the tmd
+                        tmd_enc_path = content_root_cmd + '/' + tmd_filename
+                        self.log(f'写入 {tmd_enc_path} 中...')
+                        with open(join(temp_content_root, tmd_filename), 'wb') as o:
+                            with self.crypto.create_ctr_io(Keyslot.SD, o, self.crypto.sd_path_to_iv(tmd_enc_path)) as e:
+                                e.write(bytes(cia.tmd))
+
+                        # in case the contents are corrupted
+
+                        do_continue = False
+                        # write each content
+                        for co in cia.content_info:
+                            content_filename = co.id + '.app'
+                            if is_dlc:
+                                dir_index = format((co.cindex // 256), '08x')
+                                content_enc_path = content_root_cmd + f'/{dir_index}/{content_filename}'
+                                content_out_path = join(temp_content_root, dir_index, content_filename)
+                            else:
+                                content_enc_path = content_root_cmd + '/' + content_filename
+                                content_out_path = join(temp_content_root, content_filename)
+                            self.log(f'写入 {content_enc_path} 中...')
+                            with cia.open_raw_section(co.cindex) as s, open(content_out_path, 'wb') as o:
+                                result_hash = self.copy_with_progress(s, o, co.size, content_enc_path)
+                            if result_hash != co.hash:
+                                self.log(f'警告：{content_enc_path} 的哈希值不匹配，CIA 文件可能已损坏！')
+                                if not self.force_install:
+                                    install_state['failed'].append(display_title)
+                                    shutil.rmtree(temp_title_root)
+                                    self.log(f'{content_enc_path} 安装失败，已删除临时文件夹。')
+                                    do_continue = True
+                                    self.event.update_status(path, InstallStatus.Failed)
+                                    break
+                                else:
+                                    self.log("警告：强制安装已启用，将继续安装。这可能会导致安装的内容无法正常工作。")
+
+                        if do_continue:
+                            continue
+
+                        # generate a blank save
+                        if cia.tmd.save_size:
+                            sav_enc_path = title_root_cmd + '/data/00000001.sav'
+                            tmp_sav_out_path = join(temp_title_root, 'data', '00000001.sav')
+                            sav_out_path = join(title_root, 'data', '00000001.sav')
+                            if self.overwrite_saves or not isfile(sav_out_path):
+                                cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(sav_enc_path))
+                                # in a new save, the first 0x20 are all 00s. the rest can be random
+                                data = cipher.encrypt(b'\0' * 0x20)
+                                self.log(f'正在 {sav_enc_path} 生成空白存档中...')
+                                with open(tmp_sav_out_path, 'wb') as o:
+                                    o.write(data)
+                                    o.write(b'\0' * (cia.tmd.save_size - 0x20))
+                            else:
+                                self.log(f'正在从 {sav_enc_path} 复制原先的存档中...')
+                                copy2(sav_out_path, tmp_sav_out_path)
+
+                        # generate and write cmd
+                        cmd_enc_path = content_root_cmd + '/cmd/' + cmd_filename
+                        cmd_out_path = join(temp_content_root, 'cmd', cmd_filename)
+                        self.log(f'生成 {cmd_enc_path} 中')
+                        highest_index = 0
+                        content_ids = {}
+
+                        for record in cia.content_info:
+                            highest_index = record.cindex
+                            with cia.open_raw_section(record.cindex) as s:
+                                s.seek(0x100)
+                                cmac_data = s.read(0x100)
+
+                            id_bytes = bytes.fromhex(record.id)[::-1]
+                            cmac_data += record.cindex.to_bytes(4, 'little') + id_bytes
+
+                            cmac_ncch = crypto.create_cmac_object(Keyslot.CMACSDNAND)
+                            cmac_ncch.update(sha256(cmac_data).digest())
+                            content_ids[record.cindex] = (id_bytes, cmac_ncch.digest())
+
+                        # add content IDs up to the last one
+                        ids_by_index = [CMD_MISSING] * (highest_index + 1)
+                        installed_ids = []
+                        cmacs = []
+                        for x in range(len(ids_by_index)):
+                            try:
+                                info = content_ids[x]
+                            except KeyError:
+                                # "MISSING CONTENT!"
+                                # The 3DS does generate a cmac for missing contents, but I don't know how it works.
+                                # It doesn't matter anyway, the title seems to be fully functional.
+                                cmacs.append(bytes.fromhex('4D495353494E4720434F4E54454E5421'))
+                            else:
+                                ids_by_index[x] = info[0]
+                                cmacs.append(info[1])
+                                installed_ids.append(info[0])
+                        installed_ids.sort(key=lambda x: int.from_bytes(x, 'little'))
+
+                        final = (cmd_id.to_bytes(4, 'little')
+                                 + len(ids_by_index).to_bytes(4, 'little')
+                                 + len(installed_ids).to_bytes(4, 'little')
+                                 + (1).to_bytes(4, 'little'))
+                        cmac_cmd_header = crypto.create_cmac_object(Keyslot.CMACSDNAND)
+                        cmac_cmd_header.update(final)
+                        final += cmac_cmd_header.digest()
+
+                        final += b''.join(ids_by_index)
+                        final += b''.join(installed_ids)
+                        final += b''.join(cmacs)
+
+                        cipher = crypto.create_ctr_cipher(Keyslot.SD, crypto.sd_path_to_iv(cmd_enc_path))
+                        self.log(f'写入 {cmd_enc_path} 中')
+                        with open(cmd_out_path, 'wb') as o:
+                            o.write(cipher.encrypt(final))
+
+                    # this starts building the title info entry
+                    title_info_entry_data = [
+                        # title size
+                        title_size.to_bytes(8, 'little'),
+                        # title type, seems to usually be 0x40
+                        0x40.to_bytes(4, 'little'),
+                        # title version
+                        int(cia.tmd.title_version).to_bytes(2, 'little'),
+                        # ncch version
+                        cia.contents[0].version.to_bytes(2, 'little'),
+                        # flags_0, only checking if there is a manual
+                        (1 if has_manual else 0).to_bytes(4, 'little'),
+                        # tmd content id, always starting with 0
+                        (0).to_bytes(4, 'little'),
+                        # cmd content id
+                        cmd_id.to_bytes(4, 'little'),
+                        # flags_1, only checking save data
+                        (1 if cia.tmd.save_size else 0).to_bytes(4, 'little'),
+                        # extdataid low
+                        extdata_id[0:4],
+                        # reserved
+                        b'\0' * 4,
+                        # flags_2, only using a common value
+                        0x100000000.to_bytes(8, 'little'),
+                        # product code
+                        cia.contents[0].product_code.encode('ascii').ljust(0x10, b'\0'),
+                        # reserved
+                        b'\0' * 0x10,
+                        # unknown
+                        randint(0, 0xFFFFFFFF).to_bytes(4, 'little'),
+                        # reserved
+                        b'\0' * 0x2c
+                    ]
+
+                    def remove_readonly(func, path, _):
+                        "Clear the readonly bit and reattempt the removal"
+                        os.chmod(path, stat.S_IWRITE)
+                        func(path)
+
+                    self.event.update_status(path, InstallStatus.Finishing)
+                    if isdir(title_root):
+                        self.log(f'正在从 {title_root} 移除原先的安装的文件中...')
+                        rmtree(title_root, onerror=remove_readonly)
+
+                    warning = False
+                    try:
+                        makedirs(tidhigh_root, exist_ok=True)
+                        rename(temp_title_root, title_root)
+                    except:
+                        self.log(f'无法将 {temp_title_root} 重命名为 {title_root}，请检查 SD 卡是否已满或损坏。')
                         self.log(traceback.format_exc())
+                        self.log(f'尝试将 {temp_title_root} 重命名为 {falisafe_root} 中...')
+                        self.log('如果重命名成功，后续尝试点击 “关于” -> “恢复未安装成功的应用” 处恢复应用。')
+                        try:
+                            makedirs(falisafe_root, exist_ok=True)
+                            rename(temp_title_root, falisafe_title_root)
+                            warning = True
+                            self.log(f'已将 {temp_title_root} 重命名为 {falisafe_root}，请稍后尝试恢复应用。')
+                        except:
+                            self.log(f'无法将 {temp_title_root} 重命名为 {falisafe_root}，请检查 SD 卡是否已满或损坏。')
+                            self.log(traceback.format_exc())
+                            install_state['failed'].append(display_title)
+                            self.event.update_status(path, InstallStatus.Failed)
+                            continue
+
+                    cifinish_data[int(cia.tmd.title_id, 16)] = {'seed': (get_seed(cia.contents[0].program_id) if cia.contents[0].flags.uses_seed else None)}
+
+                    # This is saved regardless if any titles were installed, so the file can be upgraded just in case.
+                    save_cifinish(cifinish_path, cifinish_data)
+
+                    with open(join(tempdir, cia.tmd.title_id), 'wb') as o:
+                        o.write(b''.join(title_info_entry_data))
+
+                    # import the directory, now including our title
+                    self.log('导入应用数据库中...')
+                    out = subprocess.run(save3ds_fuse_common_args + ['-i'],
+                                         stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT,
+                                         encoding='utf-8',
+                                         **extra_kwargs)
+                    if out.returncode:
+                        for l in out.stdout.split('\n'):
+                            self.log(l)
+                        self.log('命令行：')
+                        for l in pformat(out.args).split('\n'):
+                            self.log(l)
                         install_state['failed'].append(display_title)
                         self.event.update_status(path, InstallStatus.Failed)
-                        continue
-
-                cifinish_data[int(cia.tmd.title_id, 16)] = {'seed': (get_seed(cia.contents[0].program_id) if cia.contents[0].flags.uses_seed else None)}
-
-                # This is saved regardless if any titles were installed, so the file can be upgraded just in case.
-                save_cifinish(cifinish_path, cifinish_data)
-
-                with open(join(tempdir, cia.tmd.title_id), 'wb') as o:
-                    o.write(b''.join(title_info_entry_data))
-
-                # import the directory, now including our title
-                self.log('导入应用数据库中...')
-                out = subprocess.run(save3ds_fuse_common_args + ['-i'],
-                                     stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT,
-                                     encoding='utf-8',
-                                     **extra_kwargs)
-                if out.returncode:
-                    for l in out.stdout.split('\n'):
-                        self.log(l)
-                    self.log('命令行：')
-                    for l in pformat(out.args).split('\n'):
-                        self.log(l)
-                    install_state['failed'].append(display_title)
+                    else:
+                        install_state['installed'].append(display_title)
+                        self.event.update_status(path, InstallStatus.Done)
+                    if warning:
+                        self.event.update_status(path, InstallStatus.Warning)
+                except Exception as e:
+                    self.log(f'安装 {path} 时发生未处理的错误：{type(e).__qualname__}: {e}')
+                    self.log(traceback.format_exc())
+                    install_state['failed'].append(path)
+                    if temp_title_root and exists(temp_title_root):
+                        shutil.rmtree(temp_title_root)
+                        self.log(f'{content_enc_path} 安装失败，已删除临时文件夹：' + temp_title_root)
+                    if title_root and exists(title_root):
+                        shutil.rmtree(title_root)
+                        self.log(f'{content_enc_path} 安装失败，已删除临时文件夹：' + title_root)
                     self.event.update_status(path, InstallStatus.Failed)
-                else:
-                    install_state['installed'].append(display_title)
-                    self.event.update_status(path, InstallStatus.Done)
-                if warning:
-                    self.event.update_status(path, InstallStatus.Warning)
 
 
             copied = False
@@ -673,7 +687,7 @@ class CustomInstall:
                     self.log('需要删除某些应用（应用更新和 DLC 除外）才能使安装的应用显示。', 1)
                 finalize_3dsx_orig_path = join(script_dir, 'custom-install-finalize.3dsx')
                 hb_dir = join(self.sd, '3ds')
-                finalize_3dsx_path = join(hb_dir, 'custom-install-finalize.3dsx')
+                finalize_3dsx_path = join(hb_dir, 'custom-install-finalize.3dsx').replace('\\', '/')
                 if isfile(finalize_3dsx_orig_path):
                     self.log('复制完成程序到' + finalize_3dsx_path)
                     makedirs(hb_dir, exist_ok=True)

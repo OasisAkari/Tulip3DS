@@ -110,7 +110,7 @@ version = '4.21'
 
 
 def conventer(log=print, verbose=False, dev_keys=None, use_deprecated=False, game: list=None, output: str=None,
-              overwrite=False, boot9: str=None, ignore_encryption=False, ignore_bad_hashes=False):
+              overwrite=False, boot9: str=None, ignore_encryption=False, ignore_bad_hashes=False, on_progress=None):
     log(f"with options: verbose={verbose}, dev_keys={dev_keys}, use_deprecated={use_deprecated}, game={game}, output={output}, "
         f"overwrite={overwrite}, boot9={boot9}, ignore_encryption={ignore_encryption}, ignore_bad_hashes={ignore_bad_hashes}")
 
@@ -198,6 +198,9 @@ def conventer(log=print, verbose=False, dev_keys=None, use_deprecated=False, gam
         log('\r  {:>5.1f}% {:>10} / {}'.format(
             (minval / maxval) * 100, minval, maxval)
         )
+        # Call progress callback if provided
+        if on_progress:
+            on_progress((minval / maxval) * 100, minval, maxval)
 
 
     total_files = 0

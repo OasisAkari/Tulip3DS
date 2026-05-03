@@ -1,3 +1,6 @@
 events==0.4
 pyctr>=0.4,<0.6
 pyside6
+py7zr>=0.20.0
+rarfile>=4.0
+

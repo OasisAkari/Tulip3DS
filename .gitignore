@@ -20,3 +20,15 @@ venv/
 /build/
 /dist/
 /custom-install-finalize.3dsx
+
+boot9.bin
+seeddb.bin
+
+ci_qt.build
+ci_qt.onefile-build
+ci_qt.dist
+7zz
+7zr.exe
+unrar
+UnRAR.exe
+ci_qt.exe

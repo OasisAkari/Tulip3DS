@@ -1,5 +1,5 @@
 [project]
-name = "custom-install"
+name = "Tulip3DS"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.9"
@@ -11,7 +11,4 @@ dependencies = [
     "comtypes>=1.4.16",
     "pillow>=11.3.0",
     "nuitka[onefile]>=4.0.8",
-    "py7zr>=1.0.0",
-    "rarfile>=4.2",
-    "pyzipper>=0.3.6",
 ]

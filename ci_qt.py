@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import os
+import re
 import shutil
 import sys
 import traceback
-import pyzipper as zipfile
-import tempfile
 from datetime import datetime
 from io import BytesIO
 from os import environ
@@ -15,23 +14,13 @@ from threading import Timer
 from time import sleep, time
 from typing import Tuple, List, Dict, Optional
 
-try:
-    import py7zr
-except ImportError:
-    py7zr = None
-
-try:
-    import rarfile
-except ImportError:
-    rarfile = None
-
-from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl
+from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl, QProcess
 from PySide6.QtGui import QPixmap, QIcon, QDragEnterEvent
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
-                             QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
-                             QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
-                             QHeaderView)
+                               QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
+                               QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
+                               QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
+                               QHeaderView)
 from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
 from pyctr.crypto.engine import b9_paths, BootromNotFoundError
 from pyctr.type.cdn import CDNError, CDNReader
@@ -40,8 +29,8 @@ from pyctr.type.tmd import TitleMetadataError
 from pyctr.util import config_dirs
 
 from conv_embed import conventer
-
-from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, is_windows, get_install_size
+from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, is_windows, \
+    get_install_size
 
 # from winmica import is_mica_supported, ApplyMica, MicaType
 
@@ -604,7 +593,7 @@ class ScrollableErrorDialog(QDialog):
 
 class PasswordInputDialog(QDialog):
     """Dialog for inputting password for encrypted archives"""
-    def __init__(self, parent, archive_name: str):
+    def __init__(self, parent, archive_name: str, wrong=False):
         super().__init__(parent)
         self.setWindowTitle("输入压缩包密码")
         self.setMinimumWidth(400)
@@ -613,7 +602,7 @@ class PasswordInputDialog(QDialog):
         layout = QVBoxLayout(self)
         
         # Prompt label
-        prompt_label = QLabel(f"压缩包 '{archive_name}' 需要输入密码：")
+        prompt_label = QLabel(f"压缩包 '{archive_name}' 需要输入密码：" if not wrong else "密码错误：")
         layout.addWidget(prompt_label)
         
         # Password input field
@@ -639,6 +628,296 @@ class PasswordInputDialog(QDialog):
         super().accept()
 
 
+class CompressedFileProcessor(QObject):
+    """处理压缩文件扫描和提取的辅助类，使用QProcess实现非阻塞进程管理"""
+    scan_finished = pyqtSignal(bool, list, bool, object)  # success, files, need_password, result_data
+    extract_finished = pyqtSignal(bool, str, object)  # success, temp_dir, result_data
+    progress_updated = pyqtSignal(int, str)  # percentage, filename
+    error_occurred = pyqtSignal(str)  # error message
+    
+    def __init__(self, parent: 'CustomInstallGUI', sevenzip_path='./7za.exe' if os.name == 'nt' else '7zz'):
+        super().__init__()
+        self.sevenzip_path = sevenzip_path
+        self.process = None
+        self.output_buffer = []
+        self.current_operation = None
+        self.operation_params = {}
+        self.parent = parent
+        self._first_extract = True
+        # try to find UnRAR in project root (prefer UnRAR.exe on Windows)
+        unrar_candidates = [join(dirname(abspath(__file__)), 'UnRAR.exe'),
+                            join(dirname(abspath(__file__)), 'unrar'),
+                            'UnRAR.exe', 'unrar']
+        self.unrar_path = None
+        for c in unrar_candidates:
+            try:
+                if isfile(c):
+                    self.unrar_path = c
+                    break
+            except Exception:
+                pass
+        if not self.unrar_path:
+            # fallback to plain command name; it may or may not exist in PATH
+            self.unrar_path = 'UnRAR.exe' if os.name == 'nt' else 'unrar'
+        self.current_program_type = '7z'
+        # partial output accumulator for streams that update via carriage returns
+        self._partial_output = ''
+        # flag indicating rar archive has encrypted filenames (headers)
+        self._filename_encrypted = False
+        
+    def scan_archive(self, file_path, password=None):
+        """使用QProcess扫描压缩文件"""
+        self.current_operation = 'scan'
+        self.operation_params = {'file_path': file_path, 'password': password}
+        self.output_buffer = []
+        # prepare process and arguments; support .rar by using UnRAR
+        # reset partial and encrypted flags
+        self._partial_output = ''
+        self._filename_encrypted = False
+
+        self.process = QProcess()
+        self.process.readyReadStandardOutput.connect(self._on_scan_output)
+        self.process.readyReadStandardError.connect(self._on_scan_error)
+        self.process.finished.connect(self._on_scan_finished)
+
+        if file_path.lower().endswith('.rar'):
+            # Use UnRAR to list filenames (lb = list bare filenames)
+            self.current_program_type = 'unrar'
+            prog = self.unrar_path
+            args = [prog, 'lb', file_path]
+            # password handling for UnRAR: '-pPASSWORD' or '-p-' to disable
+            if password:
+                # insert password option after the command (prog, 'lb', ...)
+                args.insert(2, f'-p{password}')
+            else:
+                # do not prompt for password interactively; place after command
+                args.insert(2, '-p-')
+        else:
+            self.current_program_type = '7z'
+            prog = self.sevenzip_path
+            args = [prog, 'l', file_path, '-slt']
+            if password:
+                args.append(f'-p{password}')
+            else:
+                args.append('-p')
+
+        # log and start
+        try:
+            self.parent.log("参数：" + ' '.join(args))
+        except Exception:
+            pass
+        self.process.setProgram(prog)
+        # omit program itself from arguments
+        self.process.setArguments(args[1:])
+        self.process.start()
+        
+    def extract_archive(self, file_path, output_dir, password=None):
+        """使用QProcess提取压缩文件"""
+        self.current_operation = 'extract'
+        self.operation_params = {'file_path': file_path, 'output_dir': output_dir, 'password': password}
+        self.output_buffer = []
+        # prepare process and arguments; support .rar by using UnRAR
+        self.process = QProcess()
+        self.process.readyReadStandardOutput.connect(self._on_extract_output)
+        self.process.readyReadStandardError.connect(self._on_extract_error)
+        self.process.finished.connect(self._on_extract_finished)
+
+        if file_path.lower().endswith('.rar'):
+            self.current_program_type = 'unrar'
+            prog = self.unrar_path
+            # UnRAR extraction: x <archive> <output_dir> -y -pPASSWORD
+            args = [prog, 'x', file_path, output_dir, '-y']
+            # UnRAR accepts -pPASSWORD (no space); insert after the command name
+            if password:
+                args.insert(2, f'-p{password}')
+            else:
+                args.insert(2, '-p-')
+        else:
+            self.current_program_type = '7z'
+            prog = self.sevenzip_path
+            args = [prog, 'x', file_path, f'-o{output_dir}', '-aoa', '-mmt', '-bsp1', '-y']
+            if password:
+                args.append(f'-p{password}')
+            else:
+                args.append('-p')
+
+        try:
+            self.parent.log("参数：" + ' '.join(args))
+        except Exception:
+            pass
+        self.process.setProgram(prog)
+        self.process.setArguments(args[1:])
+        self.process.start()
+        
+    def _on_scan_output(self):
+        """处理扫描操作的标准输出"""
+        data = self.process.readAllStandardOutput()
+        text = bytes(data).decode('utf-8', errors='ignore')
+        for line in self._consume_output(text):
+            self.output_buffer.append(line)
+            # for unrar listing, detect encrypted headers or password prompts in output lines
+            if self.current_program_type == 'unrar':
+                ll = line.lower()
+                if any(k in ll for k in ('encrypted', 'headers are encrypted', 'file header encrypted', 'headers have been encrypted', 'enter password', 'password')):
+                    self._filename_encrypted = True
+    
+    def _on_scan_error(self):
+        """处理扫描操作的标准错误"""
+        data = self.process.readAllStandardError()
+        text = bytes(data).decode('utf-8', errors='ignore')
+        for line in self._consume_output(text):
+            self.output_buffer.append(line)
+            if self.current_program_type == 'unrar':
+                ll = line.lower()
+                if any(k in ll for k in ('encrypted', 'headers are encrypted', 'file header encrypted', 'headers have been encrypted', 'enter password', 'password')):
+                    self._filename_encrypted = True
+    
+    def _on_scan_finished(self):
+        """扫描操作完成"""
+        return_code = self.process.exitCode()
+        has_error = 0
+        files = []
+        need_password = False
+
+        if self.current_program_type == '7z':
+            for line in self.output_buffer:
+                if line.startswith("Errors: "):
+                    try:
+                        has_error = int(line[len("Errors: "):])
+                    except Exception:
+                        has_error = 1
+                if line.startswith("Path = "):
+                    files.append(line[len("Path = "):])
+                if line.startswith("Encrypted = +"):
+                    need_password = True
+        else:
+            # UnRAR: output_buffer contains bare filenames from 'lb'
+            for line in self.output_buffer:
+                # detect password-related stderr messages that may have been appended
+                l = line.lower()
+                if 'password' in l or 'encrypted' in l or 'enter password' in l:
+                    need_password = True
+                # treat any non-empty line as a filename candidate
+                if line and not any(h in line for h in ('rar', 'enter', 'password', 'error')):
+                    files.append(line)
+
+        # include filename_encrypted flag in result_data for callers to know
+        result_info = {'has_error': has_error, 'return_code': return_code, 'filename_encrypted': self._filename_encrypted}
+
+        success = return_code == 0 and has_error == 0
+        # for UnRAR, if exit code non-zero but files found, still return success True to allow extraction attempt
+        if self.current_program_type == 'unrar' and files and return_code != 0:
+            # treat as listing success (UnRAR may return non-zero for encrypted archives)
+            success = True
+
+        self.scan_finished.emit(success, files, need_password, result_info)
+    
+    def _on_extract_output(self):
+        """处理提取操作的标准输出"""
+        data = self.process.readAllStandardOutput()
+        text = bytes(data).decode('utf-8', errors='ignore')
+        for line in self._consume_output(text):
+            self.output_buffer.append(line)
+            # 解析进度（7z 输出）或提取文件名（UnRAR 输出）
+            if self.current_program_type == '7z':
+                match = re.match(r'^(\d+)% - (.*)$', line)
+                if match:
+                    percentage = int(match.group(1))
+                    filename = match.group(2)
+                    self.progress_updated.emit(percentage, filename)
+            else:
+                # UnRAR typically prints lines like "Extracting  filename" or uses carriage returns
+                m = re.search(r'Extracting\s+(.*)', line, flags=re.IGNORECASE)
+                if m:
+                    filename = m.group(1).strip()
+                    # emit -1 for unknown percentage; GUI will use filename text
+                    self.progress_updated.emit(-1, filename)
+    
+    def _on_extract_error(self):
+        """处理提取操作的标准错误"""
+        data = self.process.readAllStandardError()
+        text = bytes(data).decode('utf-8', errors='ignore')
+        for line in self._consume_output(text):
+            self.output_buffer.append(line)
+            # detect password prompts or errors from UnRAR
+            if self.current_program_type == 'unrar':
+                ll = line.lower()
+                if any(k in ll for k in ('password', 'enter password', 'encrypted', 'headers are encrypted')):
+                    # flag filename encryption/password needed
+                    self._filename_encrypted = True
+                    try:
+                        # append an indicator compatible with 7z parsing
+                        self.output_buffer.append('Encrypted = +')
+                    except Exception:
+                        pass
+
+    def _on_extract_finished(self):
+        """提取操作完成后统一解析结果并发出extract_finished信号"""
+        self._flush_process_output()
+
+        return_code = self.process.exitCode() if self.process else -1
+        temp_dir = self.operation_params.get('output_dir', '')
+        sub_item_error = 0
+
+        for line in self.output_buffer:
+            if line.startswith('Sub items Errors: '):
+                try:
+                    sub_item_error = int(line[len('Sub items Errors: '):])
+                except Exception:
+                    sub_item_error = 1
+
+        if self.current_program_type == 'unrar' and return_code != 0:
+            lb = '\n'.join(self.output_buffer).lower()
+            if any(k in lb for k in ('password', 'enter password', 'encrypted', 'headers are encrypted', 'file header encrypted')):
+                sub_item_error = 1
+
+        success = return_code == 0 and sub_item_error == 0
+        if not success:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+
+        self.extract_finished.emit(success, temp_dir, {
+            'sub_item_error': sub_item_error,
+            'return_code': return_code,
+            'filename_encrypted': self._filename_encrypted,
+        })
+
+    def _consume_output(self, text: str):
+        """Normalize and consume raw output text into complete lines.
+
+        Handles carriage-return based progress updates by converting '\r' to '\n'
+        and keeping partial trailing data in self._partial_output.
+        Returns a list of complete lines (str), without trailing newlines.
+        """
+        if not text:
+            return []
+        s = text.replace('\r\n', '\n').replace('\r', '\n')
+        s = self._partial_output + s
+        parts = s.split('\n')
+        if text and not text.endswith('\n') and not text.endswith('\r'):
+            self._partial_output = parts.pop()
+        else:
+            self._partial_output = ''
+        lines = [p.strip() for p in parts if p.strip()]
+        return lines
+    
+    def _flush_process_output(self):
+        """Consume any stdout/stderr that hasn't been delivered via readyRead signals yet."""
+        if not self.process:
+            return
+        try:
+            out_text = bytes(self.process.readAllStandardOutput()).decode('utf-8', errors='ignore')
+            err_text = bytes(self.process.readAllStandardError()).decode('utf-8', errors='ignore')
+            for line in self._consume_output(out_text):
+                self.output_buffer.append(line)
+            for line in self._consume_output(err_text):
+                self.output_buffer.append(line)
+        except Exception:
+            pass
+
+
 class CustomInstallGUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -656,6 +935,20 @@ class CustomInstallGUI(QMainWindow):
         self.lock = Lock()
         self.b9_loaded = False
         self.signals = signals
+        
+        # Initialize compressed file processor
+        self.sevenZip_exec_path = './7za.exe' if os.name == 'nt' else '7zz'
+        self.file_processor = CompressedFileProcessor(self, self.sevenZip_exec_path)
+        self.file_processor.scan_finished.connect(self._on_scan_finished)
+        self.file_processor.extract_finished.connect(self._on_extract_finished)
+        self.file_processor.progress_updated.connect(self._on_extract_progress)
+        self.file_processor.error_occurred.connect(self._on_processor_error)
+        
+        # Scanning state
+        self._scan_password = None
+        self._extract_password = None
+        self._scanning = False
+        self._extracting = False
 
         # Setup UI components
         # SD Root picker
@@ -1028,6 +1321,114 @@ class CustomInstallGUI(QMainWindow):
                 self.log(f'待删除列表中不包含 {path}，无需执行任何操作。')
         self.update_info_label()
 
+    def _scan_compressed_file_qprocess(self, file_path, password=None):
+        """使用QProcess异步扫描压缩文件"""
+        if self._scanning:
+            return
+        
+        self._scanning = True
+        self._scan_password = password
+        self._scanning_file_path = file_path
+        self.file_processor.scan_archive(file_path, password)
+    
+    def _extract_file_qprocess(self, file_path, password=None):
+        """使用QProcess异步提取压缩文件"""
+        if self._extracting:
+            return
+        
+        self._extracting = True
+        self._extract_password = password
+        self._extracting_file_path = file_path
+        
+        timestamp = str(int(time() * 1000))
+        temp_dir = join(dirname(abspath(__file__)), f'ci-install-temp-{timestamp}')
+        self._extract_temp_dir = temp_dir
+        
+        # 创建临时目录
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        self.file_processor.extract_archive(file_path, temp_dir, password)
+    
+    def _on_scan_finished(self, success, files, need_password, result_data):
+        """扫描完成的回调"""
+        self._scanning = False
+        has_error = result_data.get('has_error', 0)
+        
+        file_path = self._scanning_file_path
+        
+        if has_error == 1:
+            self.log("列出压缩包文件需要密码或文件已损坏：" + file_path)
+            password_dialog = PasswordInputDialog(self, basename(file_path), wrong=self._scan_password)
+            if password_dialog.exec() != QDialog.DialogCode.Accepted:
+                self.log("用户已取消操作：" + file_path)
+                self._scan_result = (False, [], need_password, None, False)
+                return
+            # 重新扫描（带密码）
+            self._scan_password = password_dialog.password
+            self._scan_compressed_file_qprocess(file_path, password_dialog.password)
+            return
+        elif has_error != 0:
+            self.log("扫描过程中发生了错误：" + str(has_error))
+            QMessageBox.critical(self, "错误", "解压过程中发生了错误：" + str(has_error))
+            self._scan_result = (False, [], need_password, None, False)
+        else:
+            # include filename_encrypted flag from result_data
+            fe = bool(result_data.get('filename_encrypted', False))
+            self._scan_result = (True, files, need_password, self._scan_password, fe)
+    
+    def _on_extract_finished(self, success, temp_dir, result_data):
+        """提取完成的回调"""
+        self._extracting = False
+        sub_item_error = result_data.get('sub_item_error', 0)
+        
+        self.progress_bar.reset()
+        self.progress_bar_text.setText("解压完成")
+        
+        file_path = self._extracting_file_path
+        
+        if sub_item_error == 1:
+            self.log("密码错误或文件已损坏：" + file_path)
+            password_dialog = PasswordInputDialog(self, basename(file_path), wrong=True)
+            if password_dialog.exec() != QDialog.DialogCode.Accepted:
+                self.log("用户已取消操作：" + file_path)
+                self._extract_result = (False, '', None)
+                return
+            # 重新提取（带新密码）
+            self._extract_file_qprocess(file_path, password_dialog.password)
+            return
+        elif sub_item_error != 0:
+            self.log("解压过程中发生了错误：" + str(sub_item_error))
+            QMessageBox.critical(self, "错误", "解压过程中发生了错误：" + str(sub_item_error))
+            self._extract_result = (False, '', None)
+        else:
+            self._extract_result = (True, temp_dir, self._extract_password)
+    
+    def _on_extract_progress(self, percentage, filename):
+        """更新提取进度"""
+        # Some backends (UnRAR) emit percentage=-1 when only filename is available.
+        if percentage is None:
+            percentage = -1
+        if percentage >= 0:
+            # clamp to progress range
+            try:
+                self.progress_bar.setValue(max(0, min(self.progress_bar.maximum(), int(percentage))))
+            except Exception:
+                pass
+            self.progress_bar_text.setText(f"解压中：{filename}")
+            self.log(f"{percentage}% - {filename}")
+        else:
+            # unknown percentage; only update filename text and log
+            self.progress_bar_text.setText(f"解压中：{filename}")
+            self.log(f"- - {filename}")
+    
+    def _on_processor_error(self, error_msg):
+        """处理处理器错误"""
+        self.log(f"处理器错误：{error_msg}")
+        self._scanning = False
+        self._extracting = False
+        QMessageBox.critical(self, "错误", f"处理压缩文件时出错：{error_msg}")
+
+
     def add_compressed_file(self, path: str) -> Tuple[bool, str]:
         """
         处理压缩文件（zip、7z、rar等）
@@ -1049,190 +1450,51 @@ class CustomInstallGUI(QMainWindow):
                 self.log(f'已跳过压缩文件：{path}')
                 return True, ''
 
-            # 确定压缩文件类型
-            file_ext = path.lower().split('.')[-1]
-            archive = None
-            file_list = []
-            requires_password = False
+            scan_result, file_list, need_password, password, filename_encrypted = self._scan_compressed_file_sync(path)
+            archive_is_rar = path.lower().endswith('.rar')
 
-            if file_ext == 'zip':
-                try:
-                    with zipfile.ZipFile(path, 'r') as probe_archive:
-                        # ZIP 可直接从标志位判断文件是否加密
-                        requires_password = any(
-                            (info.flag_bits & 0x1) and not info.is_dir()
-                            for info in probe_archive.infolist()
-                        )
-                except Exception as e:
-                    return False, f'无法读取 ZIP 文件：{e}'
-
-            elif file_ext == '7z':
-                if py7zr is None:
-                    return False, '不支持 7z 格式，请安装 py7zr 库'
-                try:
-                    with py7zr.SevenZipFile(path, 'r') as probe_archive:
-                        # 新版本 py7zr 提供 needs_password()，旧版本退化为探测读取目录
-                        if hasattr(probe_archive, 'needs_password'):
-                            requires_password = bool(probe_archive.needs_password())
-                        else:
-                            try:
-                                probe_archive.getnames()
-                                requires_password = False
-                            except Exception:
-                                requires_password = True
-                except Exception as e:
-                    return False, f'无法读取 7z 文件：{e}'
-
-            elif file_ext == 'rar':
-                if rarfile is None:
-                    return False, '不支持 RAR 格式，请安装 rarfile 库'
-                try:
-                    with rarfile.RarFile(path, 'r') as probe_archive:
-                        file_infos = [info for info in probe_archive.infolist() if not info.isdir()]
-                        requires_password = any(info.needs_password() for info in file_infos)
-                except Exception as e:
-                    return False, f'无法读取 RAR 文件：{e}'
-            else:
-                return False, f'不支持的压缩格式：{file_ext}'
-
-            # 先处理密码输入
-            password = None
-            if requires_password:
+            # RAR: if list is empty or encrypted hints appear, ask for password before filtering supported files
+            if archive_is_rar and (filename_encrypted or need_password or not file_list) and not password:
+                self.log('检测到 RAR 可能已加密或文件名被加密，需要输入密码')
                 password_dialog = PasswordInputDialog(self, basename(path))
                 if password_dialog.exec() != QDialog.DialogCode.Accepted:
-                    return False, '用户取消了操作'
+                    self.log('用户已取消操作：' + path)
+                    return False, '用户已取消操作：' + path
+                password = password_dialog.password
+                scan_result, file_list, need_password, password, filename_encrypted = self._scan_compressed_file_sync(path, password)
+
+            if not scan_result:
+                return False, '扫描压缩文件失败：' + path
+
+            if need_password and not password:
+                password_dialog = PasswordInputDialog(self, basename(path))
+                if password_dialog.exec() != QDialog.DialogCode.Accepted:
+                    self.log('用户已取消操作：' + path)
+                    return False, '用户已取消操作：' + path
                 password = password_dialog.password
 
-            # 先验证密码可用，再获取文件列表
-            try:
-                self.switch_button_states(False)
-                if file_ext == 'zip':
-                    archive = zipfile.ZipFile(path, 'r')
-                    file_list = archive.namelist()
-
-                    if requires_password:
-                        encrypted_files = [
-                            info.filename
-                            for info in archive.infolist()
-                            if (info.flag_bits & 0x1) and not info.is_dir()
-                        ]
-                        if encrypted_files:
-                            if not password:
-                                return False, '压缩包需要密码'
-                            try:
-                                with archive.open(encrypted_files[0], pwd=password.encode('utf-8')) as f:
-                                    f.read(1)
-                            except RuntimeError as e:
-                                return False, f'密码错误或 ZIP 文件损坏：{e}'
-
-                elif file_ext == '7z':
-                    archive = py7zr.SevenZipFile(path, 'r', password=password or None)
-                    file_list = archive.getnames()
-
-                    if requires_password and not password:
-                        return False, '压缩包需要密码'
-
-                    first_file = next((f for f in file_list if not f.endswith('/')), None)
-                    if first_file:
-                        with tempfile.TemporaryDirectory(prefix='ci-7z-check-') as check_dir:
-                            archive.reset()
-                            archive.extract(path=check_dir, targets=[first_file])
-
-                elif file_ext == 'rar':
-                    archive = rarfile.RarFile(path, 'r')
-                    file_list = archive.namelist()
-
-                    if requires_password and not password:
-                        return False, '压缩包需要密码'
-
-                    first_file = next((f for f in file_list if not f.endswith('/')), None)
-                    if first_file:
-                        try:
-                            with archive.open(first_file, 'r', pwd=password):
-                                pass
-                        except Exception as e:
-                            return False, f'密码错误或 RAR 文件损坏：{e}'
-
-            except Exception as e:
-                return False, f'无法验证压缩包密码或读取文件列表：{e}'
-
-            finally:
-                self.switch_button_states(True)
-                if archive:
-                    archive.close()
-
-            # 在密码验证通过后，再检查压缩包内是否存在符合格式的文件
+            self.switch_button_states(False)
             valid_files = [f for f in file_list if f.lower().endswith(('.cia', '.3ds', '.cci'))]
+            if not valid_files and archive_is_rar and not password:
+                return False, 'RAR 压缩包需要密码或内部不包含 .cia/.3ds/.cci 文件'
             if not valid_files:
                 return False, '压缩包内没有找到 .cia/.3ds/.cci 文件'
 
             self.log(f'找到 {len(valid_files)} 个符合格式的文件')
-
-            # 创建临时文件夹
-            timestamp = str(int(time() * 1000))
-            temp_dir = join(dirname(abspath(__file__)), f'ci-install-temp-{timestamp}')
-
-            previous_add_cia_state = self.add_cia_button.isEnabled()
-
-            def update_extract_progress(current: int, total: int, text: str = '解压中'):
-                total = max(total, 1)
-                percent = int(current / total * 100)
-                self.progress_bar.setValue(percent)
-                self.progress_bar_text.setText(f'{text}: {current}/{total} ({percent}%)')
-                QApplication.processEvents()
-
+            temp_dir = ''
             try:
-                os.makedirs(temp_dir, exist_ok=True)
-                self.log(f'创建临时目录：{temp_dir}')
-            except Exception as e:
-                return False, f'无法创建临时目录：{e}'
-
-            # 解压文件
-            try:
-                self.switch_button_states(False)
                 QApplication.processEvents()
-
-                if file_ext == 'zip':
-                    with zipfile.AESZipFile(path, 'r') as archive:
-                        members = [info for info in archive.infolist() if not info.is_dir()]
-                        total_members = len(members)
-                        for index, info in enumerate(members, 1):
-                            if password:
-                                archive.extract(info, path=temp_dir, pwd=password.encode('utf-8'))
-                            else:
-                                archive.extract(info, path=temp_dir)
-                            update_extract_progress(index, total_members)
-
-                elif file_ext == '7z':
-                    with py7zr.SevenZipFile(path, 'r', password=password or None) as archive:
-                        members = [name for name in archive.getnames() if not name.endswith('/')]
-                        total_members = len(members)
-                        for index, member in enumerate(members, 1):
-                            archive.extract(path=temp_dir, targets=[member])
-                            update_extract_progress(index, total_members)
-
-                elif file_ext == 'rar':
-                    with rarfile.RarFile(path, 'r') as archive:
-                        members = [info for info in archive.infolist() if not info.isdir()]
-                        total_members = len(members)
-                        for index, info in enumerate(members, 1):
-                            archive.extract(info, path=temp_dir, pwd=password if password else None)
-                            update_extract_progress(index, total_members)
+                extract_result, temp_dir, _ = self._extract_file_sync(path, password)
+                if not extract_result:
+                    raise Exception('提取文件失败')
 
                 self.log(f'已解压到临时目录：{temp_dir}')
 
-            except (RuntimeError, EOFError) as e:
-                # 清理临时目录
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-                return False, f'解压失败，可能密码错误或文件损坏：{e}'
 
             except Exception as e:
-                # 清理临时目录
                 try:
-                    shutil.rmtree(temp_dir)
+                    if temp_dir:
+                        shutil.rmtree(temp_dir)
                 except:
                     pass
                 return False, f'解压失败：{e}'
@@ -1241,9 +1503,7 @@ class CustomInstallGUI(QMainWindow):
                 self.progress_bar.setValue(0)
                 self.progress_bar_text.setText('')
                 QApplication.processEvents()
-                self.switch_button_states(True)
 
-            # 将解压后的文件夹传递给_add_folder，并设置delete=True以便处理完后删除
             self.log('将临时目录中的文件添加到列表...')
             self._add_folder(temp_dir, delete=True)
 
@@ -1253,6 +1513,51 @@ class CustomInstallGUI(QMainWindow):
             self.log(f'处理压缩文件时出错：{e}')
             traceback.print_exc()
             return False, f'处理压缩文件时出错：{e}'
+        finally:
+            self.switch_button_states(True)
+    
+    def _scan_compressed_file_sync(self, file_path, password=None):
+        """同步包装器：等待扫描完成并返回结果"""
+        # 初始化结果
+        self._scan_result = None
+        
+        # 启动异步扫描
+        self._scan_compressed_file_qprocess(file_path, password)
+        
+        # 等待扫描完成（阻塞主线程，但允许事件处理）
+        max_wait = 300  # 最多等待30秒
+        wait_count = 0
+        while self._scanning and wait_count < max_wait:
+            QApplication.processEvents()
+            sleep(0.1)
+            wait_count += 1
+        
+        if self._scan_result:
+            return self._scan_result
+        else:
+            # return (success, files, need_password, password, filename_encrypted)
+            return False, [], False, None, False
+    
+    def _extract_file_sync(self, file_path, password=None):
+        """同步包装器：等待提取完成并返回结果"""
+        # 初始化结果
+        self._extract_result = None
+        
+        # 启动异步提取
+        self._extract_file_qprocess(file_path, password)
+        
+        # 等待提取完成（阻塞主线程，但允许事件处理）
+        max_wait = 3000  # 最多等待300秒
+        wait_count = 0
+        while self._extracting and wait_count < max_wait:
+            QApplication.processEvents()
+            sleep(0.1)
+            wait_count += 1
+        
+        if self._extract_result:
+            return self._extract_result
+        else:
+            return False, '', None
 
     def add_cia(self, path: str) -> Tuple[bool, str]:
         try:

@@ -32,3 +32,6 @@ ci_qt.dist
 unrar
 UnRAR.exe
 ci_qt.exe
+7za.exe
+
+test*

@@ -1106,6 +1106,7 @@ class Tulip3DSGUI(QMainWindow):
         self.log_window = QTextEdit()
         self.log_window.setReadOnly(True)
         self.log_window.setMinimumHeight(100)
+        self.log_window.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # Enable word wrap to prevent horizontal expansion
         self.splitter.addWidget(self.log_window)
 
         # Setup progress bar

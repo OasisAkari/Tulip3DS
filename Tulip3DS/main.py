@@ -6,7 +6,6 @@ import sys
 import traceback
 from datetime import datetime
 from io import BytesIO
-from os import environ
 from os.path import abspath, basename, dirname, join, isfile, isdir
 from pathlib import Path
 from threading import Thread, Lock
@@ -26,36 +25,24 @@ from pyctr.crypto.engine import b9_paths, BootromNotFoundError
 from pyctr.type.cdn import CDNError, CDNReader
 from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
-from pyctr.util import config_dirs
 
-from conv_embed import conventer
-from custominstall import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, is_windows, \
+from utils.conv_embed import conventer
+from utils.custominstall import CustomInstall, load_tufinish, InvalidTUFinishError, InstallStatus, is_windows, \
     get_install_size
 
 # from winmica import is_mica_supported, ApplyMica, MicaType
 
-# This file is a part of custom-install.py.
-#
-# custom-install is copyright (c) 2019-2020 Ian Burgwin
-# This file is licensed under The MIT License (MIT).
-# You can find the full license text in LICENSE.md in the root of this project.
-
 file_parent = dirname(abspath(__file__))
+current_path = Path(file_parent)
 
-CI_VERSION = 'OasisAkari Modded 1.5'
+TU_VERSION = '1.0'
 
 
 # automatically load boot9 if it's in the current directory
-b9_paths.insert(0, join(file_parent, 'boot9.bin'))
-b9_paths.insert(0, join(file_parent, 'boot9_prot.bin'))
+b9_paths.insert(0, str(current_path / 'bin' / 'boot9.bin'))
 
-seeddb_paths = [join(x, 'seeddb.bin') for x in config_dirs]
-try:
-    seeddb_paths.insert(0, environ['SEEDDB_PATH'])
-except KeyError:
-    pass
-# automatically load seeddb if it's in the current directory
-seeddb_paths.insert(0, join(file_parent, 'seeddb.bin'))
+seeddb_paths = []
+seeddb_paths.insert(0, str(current_path / 'bin' / 'seeddb.bin'))
 
 
 taskbar = None
@@ -63,7 +50,7 @@ if is_windows:
     try:
         import comtypes.client as cc
 
-        tbl = cc.GetModule(file_parent + '/TaskbarLib.tlb')
+        tbl = cc.GetModule(file_parent + '/bin/win32/TaskbarLib.tlb')
 
         taskbar = cc.CreateObject('{56FDF344-FD6D-11D0-958A-006097C9A090}', interface=tbl.ITaskbarList3)
         taskbar.HrInit()
@@ -141,12 +128,11 @@ class ConvertDialog(QDialog):
     error_signal = pyqtSignal(str, str)
     info_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal()
-    def __init__(self, parent, boot9_path: str, log_func=print):
+    def __init__(self, parent, log_func=print):
         super().__init__(parent)
         self.setWindowTitle("转换 3DS/CCI 文件为 CIA")
         self.setAcceptDrops(True)
 
-        self.boot9_path = boot9_path
         self.log = log_func
         self.files_to_convert = []
         self.is_converting = False
@@ -317,11 +303,6 @@ class ConvertDialog(QDialog):
         if not self.files_to_convert or self.is_converting:
             return
 
-        if not self.boot9_path or not isfile(self.boot9_path):
-            # Use signal to show warning on main thread
-            self.error_signal.emit("错误", "boot9.bin 文件路径无效")
-            return
-
         conversion_jobs = self._prepare_conversion_jobs()
         if not conversion_jobs:
             self.is_converting = False
@@ -352,7 +333,7 @@ class ConvertDialog(QDialog):
                         game=[file_path],
                         output=output_dir,
                         overwrite=overwrite,
-                        boot9=self.boot9_path,
+                        boot9=b9_paths[0],
                         ignore_bad_hashes=False,
                         on_progress=lambda percent, read, size: self.convert_progress_signal.emit(percent, read, size, idx, total_files)
                     )
@@ -419,9 +400,9 @@ signals = InstallSignals()
 
 
 class AboutDialog(QDialog):
-    def __init__(self, parent: 'CustomInstallGUI'):
+    def __init__(self, parent: 'Tulip3DSGUI'):
         super().__init__(parent)
-        self.setWindowTitle("关于 custom-install")
+        self.setWindowTitle("关于 Tulip3DS")
         self.setMinimumSize(QSize(300, 300))
 
         # Setup layout
@@ -429,14 +410,14 @@ class AboutDialog(QDialog):
 
         # Add text
         about_text = (
-            f"<h2>custom-install {CI_VERSION}</h2>"
-            "<p>汉化 & 界面重构 By OasisAkari （一只火狐） - <a href='https://stray-soul.com/'>https://stray-soul.com/</a></p>"
+            f"<h2>Tulip3DS {TU_VERSION}</h2>"
+            "<p>By OasisAkari （一只火狐） - <a href='https://stray-soul.com/'>https://stray-soul.com/</a></p>"
             "<p>禁止二次出售（如闲鱼等平台）与商用。</p>"
-            "<p>原程序作者：ihaveamac - <a href='https://github.com/ihaveamac/custom-install'>https://github.com/ihaveamac/custom-install</a></p>"
-            "<p>本 GUI 参考了 chinnsenn 的实现： <a href='https://github.com/chinnsenn/custom-install/tree/safe-install'>https://github.com/chinnsenn/custom-install/tree/safe-install</a></p>"
-            "<p>在此表示感谢。</p>"
+            # "<p>原程序作者：ihaveamac - <a href='https://github.com/ihaveamac/custom-install'>https://github.com/ihaveamac/custom-install</a></p>"
+            # "<p>本 GUI 参考了 chinnsenn 的实现： <a href='https://github.com/chinnsenn/custom-install/tree/safe-install'>https://github.com/chinnsenn/custom-install/tree/safe-install</a></p>"
+            # "<p>在此表示感谢。</p>"
             "<p>如果你在使用过程中遇到了问题，请先检查一下使用教程：<a href='https://stray-soul.com/ci.html'>https://stray-soul.com/ci.html</a>"
-            "<p>本修改版开源地址：<a href='https://github.com/OasisAkari/custom-install/tree/qt-hans'>https://github.com/OasisAkari/custom-install/tree/qt-hans</a></p>"
+            "<p>开源地址：<a href='https://github.com/OasisAkari/Tulip3DS'>https://github.com/OasisAkari/Tulip3DS</a></p>"
             "<p>生活不易，如果您觉得工具好用可以点击这里支持我：<a href='https://stray-soul.com/donate.html'>https://stray-soul.com/donate.html</a></p>"
         )
 
@@ -467,13 +448,13 @@ class AboutDialog(QDialog):
 
         self.force_install_checkbox.clicked.connect(force_install_changed_warning)
 
-        # add export custom-install-finalize button
-        export_button = QPushButton("导出 custom-install-finalize")
+        # add export Tulip3DS Client button
+        export_button = QPushButton("导出 Tulip3DS Client")
         layout.addWidget(export_button)
 
         def export_finalize():
             confirm = QMessageBox.question(
-                self, "导出 custom-install-finalize", "你确定要导出 custom-install-finalize 吗？",
+                self, "导出 Tulip3DS Client", "你确定要导出 Tulip3DS Client 吗？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if confirm == QMessageBox.StandardButton.Yes:
@@ -487,7 +468,7 @@ class AboutDialog(QDialog):
         def recover_pending_install():
             confirm = QMessageBox.question(
                 self, "恢复未完成的安装", "你确定要恢复未完成的安装吗？\n"
-                "这将会尝试从 SD 卡根目录的 ci-pending 文件夹中恢复上次未完成的安装。",
+                "这将会尝试从 SD 卡根目录的 tu-pending 文件夹中恢复上次未完成的安装。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if confirm == QMessageBox.StandardButton.Yes:
@@ -500,7 +481,7 @@ class AboutDialog(QDialog):
         def delete_corrupted_files():
             confirm = QMessageBox.question(
                 self, "删除损坏的文件", "你确定要删除损坏的文件吗？\n"
-                "这将会尝试从 SD 卡根目录的 ci-install-temp 为前缀的文件夹中删除所有损坏的文件。",
+                "这将会尝试从 SD 卡根目录的 tu-install-temp 为前缀的文件夹中删除所有损坏的文件。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if confirm == QMessageBox.StandardButton.Yes:
@@ -511,7 +492,7 @@ class AboutDialog(QDialog):
         convert_button = QPushButton("转换 3DS / CCI 为 CIA 格式")
 
         def open_convert_dialog():
-            d = ConvertDialog(self, parent.boot9_path.text(), parent.log)
+            d = ConvertDialog(self, parent.log)
             d.show()
 
         layout.addWidget(convert_button)
@@ -635,30 +616,24 @@ class CompressedFileProcessor(QObject):
     progress_updated = pyqtSignal(int, str)  # percentage, filename
     error_occurred = pyqtSignal(str)  # error message
     
-    def __init__(self, parent: 'CustomInstallGUI', sevenzip_path='./7za.exe' if os.name == 'nt' else '7zz'):
+    def __init__(self, parent: 'Tulip3DSGUI'):
         super().__init__()
-        self.sevenzip_path = sevenzip_path
+        if sys.platform == 'win32':
+            self.sevenzip_path = join(dirname(abspath(__file__)), sys.platform, '7za.exe')
+        else:
+            self.sevenzip_path = join(dirname(abspath(__file__)), sys.platform, '7zz')
         self.process = None
         self.output_buffer = []
         self.current_operation = None
         self.operation_params = {}
         self.parent = parent
         self._first_extract = True
-        # try to find UnRAR in project root (prefer UnRAR.exe on Windows)
-        unrar_candidates = [join(dirname(abspath(__file__)), 'UnRAR.exe'),
-                            join(dirname(abspath(__file__)), 'unrar'),
-                            'UnRAR.exe', 'unrar']
+
         self.unrar_path = None
-        for c in unrar_candidates:
-            try:
-                if isfile(c):
-                    self.unrar_path = c
-                    break
-            except Exception:
-                pass
-        if not self.unrar_path:
-            # fallback to plain command name; it may or may not exist in PATH
-            self.unrar_path = 'UnRAR.exe' if os.name == 'nt' else 'unrar'
+        if sys.platform == 'win32':
+            self.unrar_path = join(dirname(abspath(__file__)), sys.platform, 'UnRAR.exe')
+        else:
+            self.unrar_path = join(dirname(abspath(__file__)), sys.platform, 'unrar')
         self.current_program_type = '7z'
         # partial output accumulator for streams that update via carriage returns
         self._partial_output = ''
@@ -918,11 +893,11 @@ class CompressedFileProcessor(QObject):
             pass
 
 
-class CustomInstallGUI(QMainWindow):
+class Tulip3DSGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self.setWindowTitle(f'custom-install {CI_VERSION}')
+        self.setWindowTitle(f'Tulip3DS {TU_VERSION}')
         self.resize(800, 600)
 
         # Setup main widget and layout
@@ -938,7 +913,7 @@ class CustomInstallGUI(QMainWindow):
         
         # Initialize compressed file processor
         self.sevenZip_exec_path = './7za.exe' if os.name == 'nt' else '7zz'
-        self.file_processor = CompressedFileProcessor(self, self.sevenZip_exec_path)
+        self.file_processor = CompressedFileProcessor(self)
         self.file_processor.scan_finished.connect(self._on_scan_finished)
         self.file_processor.extract_finished.connect(self._on_extract_finished)
         self.file_processor.progress_updated.connect(self._on_extract_progress)
@@ -961,32 +936,6 @@ class CustomInstallGUI(QMainWindow):
         sd_layout.addWidget(self.sd_path)
         sd_layout.addWidget(self.sd_button)
         self.layout.addLayout(sd_layout)
-
-        # Boot9 picker
-        boot9_layout = QHBoxLayout()
-        self.boot9_label = QLabel('boot9.bin 文件：')
-        self.boot9_path = QLineEdit()
-        if default_b9_path:
-            self.boot9_path.setText(default_b9_path)
-        self.boot9_button = QPushButton('选择')
-        self.boot9_button.clicked.connect(lambda: self.select_file('boot9', '*.bin'))
-        boot9_layout.addWidget(self.boot9_label)
-        boot9_layout.addWidget(self.boot9_path)
-        boot9_layout.addWidget(self.boot9_button)
-        self.layout.addLayout(boot9_layout)
-
-        # Seeddb picker
-        seeddb_layout = QHBoxLayout()
-        self.seeddb_label = QLabel('seeddb 文件：')
-        self.seeddb_path = QLineEdit()
-        if default_seeddb_path:
-            self.seeddb_path.setText(default_seeddb_path)
-        self.seeddb_button = QPushButton('选择')
-        self.seeddb_button.clicked.connect(lambda: self.select_file('seeddb', '*.bin'))
-        seeddb_layout.addWidget(self.seeddb_label)
-        seeddb_layout.addWidget(self.seeddb_path)
-        seeddb_layout.addWidget(self.seeddb_button)
-        self.layout.addLayout(seeddb_layout)
 
         # Movable.sed picker
         movable_layout = QHBoxLayout()
@@ -1114,8 +1063,6 @@ class CustomInstallGUI(QMainWindow):
         # textChanged signals
         self.sd_path.textChanged.connect(self.update_button_states)
         self.movable_path.textChanged.connect(self.update_button_states)
-        self.seeddb_path.textChanged.connect(self.update_button_states)
-        self.boot9_path.textChanged.connect(self.update_button_states)
 
         # Setup signals
         self.signals.log_signal.connect(self.on_log)
@@ -1134,8 +1081,8 @@ class CustomInstallGUI(QMainWindow):
         self.signals.finished_signal.connect(self.on_finished_signal)
 
         # Initial state
-        self.log(f'custom-install {CI_VERSION} - https://github.com/OasisAkari/custom-install')
-        self.log(f'汉化 & 修改 By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
+        self.log(f'Tulip3DS {TU_VERSION} - https://github.com/OasisAkari/Tulip3DS')
+        self.log(f'By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
         self.log("就绪。")
 
         # if is_mica_supported():
@@ -1166,26 +1113,23 @@ class CustomInstallGUI(QMainWindow):
         directory = QFileDialog.getExistingDirectoryUrl(self, "选择 SD 卡根目录", qurl)
         directory = directory.toLocalFile() if directory else None
         if directory:
-            cifinish_path = join(directory, 'cifinish.bin')
+            finish_path = join(directory, 'finish.bin')
             try:
-                load_cifinish(cifinish_path)
-            except InvalidCIFinishError:
+                load_tufinish(finish_path)
+            except InvalidTUFinishError:
                 QMessageBox.critical(self, '错误',
-                                     f'卡内的{cifinish_path}是损坏的！\n\n'
+                                     f'卡内的{finish_path}是损坏的！\n\n'
                                     f'这可能代表着 SD 卡或其文件系统出错。请使用磁盘检查工具查找错误。\n'
                                     f'这也可能是 custom-install 的问题（虽然不太可能）。\n\n'
-                                    f'请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 cifinish.bin，然后重新启动 custom-install。')
+                                    f'请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 finish.bin，然后重新启动 custom-install。')
                 return
 
             self.sd_path.setText(directory)
-
+            self.check_b9_loaded()
+            load_seeddb(seeddb_paths[0])
             # Auto-detect files
-            for filename in ['boot9.bin', 'seeddb.bin', 'movable.sed']:
-                path = self.auto_detect_file(directory, filename)
-                if filename == 'boot9.bin':
-                    self.check_b9_loaded()
-                if filename == 'seeddb.bin' and path:
-                    load_seeddb(path)
+            for filename in ['movable.sed']:
+                self.auto_detect_file(directory, filename)
         self.update_button_states()
 
 
@@ -1194,11 +1138,7 @@ class CustomInstallGUI(QMainWindow):
         found_path = find_first_file(paths)
         if found_path:
             self.log(f'从 SD 卡的 {found_path} 找到了 {filename}')
-            if filename == 'boot9.bin':
-                self.boot9_path.setText(found_path)
-            elif filename == 'seeddb.bin':
-                self.seeddb_path.setText(found_path)
-            elif filename == 'movable.sed':
+            if filename == 'movable.sed':
                 self.movable_path.setText(found_path)
             return found_path
         return None
@@ -1206,13 +1146,7 @@ class CustomInstallGUI(QMainWindow):
     def select_file(self, file_type: str, file_filter: str):
         file_name, _ = QFileDialog.getOpenFileName(self, f"选择 {file_type}", "", f"{file_type} ({file_filter})")
         if file_name:
-            if file_type == 'boot9':
-                self.boot9_path.setText(file_name.replace('\\', '/'))
-                self.check_b9_loaded()
-            elif file_type == 'seeddb':
-                self.seeddb_path.setText(file_name.replace('\\', '/'))
-                load_seeddb(file_name.replace('\\', '/'))
-            elif file_type == 'movable.sed':
+            if file_type == 'movable.sed':
                 self.movable_path.setText(file_name.replace('\\', '/'))
         self.update_button_states()
 
@@ -1268,7 +1202,7 @@ class CustomInstallGUI(QMainWindow):
                                 self.log("已删除：" + file_path)
                                 _p = Path(file_path)
                                 if _p.parent.exists():
-                                    if not any(_p.parent.iterdir()) and _p.parent.name.startswith('ci-install-temp'):
+                                    if not any(_p.parent.iterdir()) and _p.parent.name.startswith('tu-install-temp'):
                                         _pp = str(_p.parent).replace("\\", "/")
                                         self.log(f'目录 {_pp} 为空，尝试删除...')
                                         _p.parent.rmdir()
@@ -1310,7 +1244,7 @@ class CustomInstallGUI(QMainWindow):
                         self.log("已删除：", path)
                         _p = Path(path)
                         if _p.parent.exists():
-                            if not any(_p.parent.iterdir()) and _p.parent.name.startswith('ci-install-temp'):
+                            if not any(_p.parent.iterdir()) and _p.parent.name.startswith('tu-install-temp'):
                                 _pp = str(_p.parent).replace("\\", "/")
                                 self.log(f'目录 {_pp} 为空，尝试删除...')
                                 _p.parent.rmdir()
@@ -1341,7 +1275,7 @@ class CustomInstallGUI(QMainWindow):
         self._extracting_file_path = file_path
         
         timestamp = str(int(time() * 1000))
-        temp_dir = join(dirname(abspath(__file__)), f'ci-install-temp-{timestamp}')
+        temp_dir = join(dirname(abspath(__file__)), f'tu-install-temp-{timestamp}')
         self._extract_temp_dir = temp_dir
         
         # 创建临时目录
@@ -1701,7 +1635,7 @@ class CustomInstallGUI(QMainWindow):
                 self.switch_button_states(False)
                 changed_button = True
                 timestamp = str(int(time() * 1000))
-                tmp_dir = str(Path(file_parent) / f'ci-install-temp-{timestamp}').replace('\\', '/')
+                tmp_dir = str(Path(file_parent) / f'tu-install-temp-{timestamp}').replace('\\', '/')
                 # Check free space on the drive where the temp folder will be created.
                 try:
                     # Determine the drive/root for the tmp_dir (works on Windows and POSIX)
@@ -1727,7 +1661,7 @@ class CustomInstallGUI(QMainWindow):
                           verbose=True,
                           game=[path],
                           output=tmp_dir,
-                          boot9=self.boot9_path.text(),
+                          boot9=b9_paths[0],
                           ignore_bad_hashes=self.force_install,
                           on_progress=lambda percent, read, size: self.signals.convert_progress_signal.emit(percent, read, size))
             self.log(f'转换完成，已缓存到 {tmp_dir}。正在添加到列表中...')
@@ -1780,7 +1714,7 @@ class CustomInstallGUI(QMainWindow):
     def check_b9_loaded(self):
         self.b9_loaded = False
         try:
-            crypto = CryptoEngine(boot9=self.boot9_path.text() if self.boot9_path.text() else None)
+            crypto = CryptoEngine(boot9=b9_paths[0])
             self.b9_loaded = crypto.b9_keys_set
         except MissingSeedError:
             pass
@@ -1827,10 +1761,10 @@ class CustomInstallGUI(QMainWindow):
         self.info_label.setText(info_text)
 
     def _update_button_states(self):
-        self.enabled_button = all([self.check_b9_loaded(),
+        self.enabled_button = all([
                        self.sd_path.text(),
                        self.movable_path.text(),
-                       self.seeddb_path.text()])
+                       ])
 
         self.switch_button_states(self.enabled_button)
         self.update_info_label()
@@ -1927,12 +1861,12 @@ class CustomInstallGUI(QMainWindow):
     def on_installed_signal(self, lst: List[str], copied: bool, application_count: int):
         tex = '已完成安装。\n'
         if copied:
-            tex += "custom-install-finalize 已被复制到 SD 卡。\n"
+            tex += "Tulip3DS Client 已被复制到 SD 卡。\n"
         root_ = self.sd_path.text()
         lst_dir = os.listdir(root_)
         if 'boot.firm' not in lst_dir or 'boot.3dsx' not in lst_dir:
             tex += ("重要警告：SD 卡根目录中未找到 boot.firm 或 boot.3dsx 文件。\n"
-                    "请确保你已将 boot.firm 或 boot.3dsx 文件放在 SD 卡根目录中，以便能够正常启动完成安装程序。（custom-install-finalize）\n")
+                    "请确保你已将 boot.firm 或 boot.3dsx 文件放在 SD 卡根目录中，以便能够正常启动完成安装程序。（Tulip3DS Client）\n")
         if application_count > 300:
             tex += "注意：安装的应用数量超过 300 个，主机可能会无法正常显示所有应用。\n\n"
         tex += '成功安装了下列应用：\n'
@@ -1957,7 +1891,7 @@ class CustomInstallGUI(QMainWindow):
                         os.remove(path)
                         self.log(f"已删除 {path}")
                         _p = Path(path)
-                        if _p.parent.exists() and _p.parent.name.startswith('ci-install-temp'):
+                        if _p.parent.exists() and _p.parent.name.startswith('tu-install-temp'):
                             if not any(_p.parent.iterdir()):
                                 _pp = str(_p.parent).replace("\\", "/")
                                 self.log(f'目录 {_pp} 为空，尝试删除...')
@@ -1986,22 +1920,22 @@ class CustomInstallGUI(QMainWindow):
         if not self.sd_path.text():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        src = Path(file_parent) / 'custom-install-finalize.3dsx'
-        dst = Path(self.sd_path.text()) / '3ds' / 'custom-install-finalize.3dsx'
+        src = Path(file_parent) / 'Tulip3DS-Client.cia'
+        dst = Path(self.sd_path.text()) / 'Tulip3DS-Client.cia'
         try:
             shutil.copy(src, dst)
-            QMessageBox.information(self, "成功", f"custom-install-finalize 已导出到 {dst}。")
+            QMessageBox.information(self, "成功", f"Tulip3DS Client 已导出到 {dst}。")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出 custom-install-finalize 失败：{str(e)}")
-            self.log(f"导出 custom-install-finalize 失败：{str(e)}")
+            QMessageBox.critical(self, "错误", f"导出 Tulip3DS Client 失败：{str(e)}")
+            self.log(f"导出 Tulip3DS Client 失败：{str(e)}")
 
     def on_recover_pending_install_signal(self):
         if not self.sd_path.text():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        pending_path = Path(self.sd_path.text()) / 'ci-pending'
+        pending_path = Path(self.sd_path.text()) / 'tu-pending'
         if not pending_path.exists() or not pending_path.is_dir():
-            QMessageBox.warning(self, "错误", f"未找到 ci-pending 文件夹：{pending_path}")
+            QMessageBox.warning(self, "错误", f"未找到 tu-pending 文件夹：{pending_path}")
             return
         try:
             for p in pending_path.iterdir():
@@ -2019,7 +1953,7 @@ class CustomInstallGUI(QMainWindow):
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
         deleted = False
-        for p in Path(self.sd_path.text()).glob('ci-install-temp*'):
+        for p in Path(self.sd_path.text()).glob('tu-install-temp*'):
             deleted = True
             if p.is_dir():
                 try:
@@ -2057,7 +1991,7 @@ class CustomInstallGUI(QMainWindow):
             # Show notification
             QApplication.alert(self, 60000)
             self.tray_icon.showMessage(
-                "custom install安装完成",
+                "安装完成",
                 "请检查窗口以获取安装结果。",
                 QSystemTrayIcon.MessageIcon.Information,
                 2000  # Duration in milliseconds
@@ -2095,10 +2029,9 @@ class CustomInstallGUI(QMainWindow):
             if taskbar:
                 taskbar.SetProgressState(int(self.winId()), tbl.TBPF_NORMAL)
 
-            # Create CustomInstall instance
             custom_install = CustomInstall(
-                boot9=self.boot9_path.text() if self.boot9_path.text() else None,
-                seeddb=self.seeddb_path.text() if self.seeddb_path.text() else None,
+                boot9=b9_paths[0],
+                seeddb=seeddb_paths[0],
                 movable=movable_path,
                 sd=sd_path,
                 skip_contents=self.skip_contents.isChecked(),
@@ -2133,7 +2066,7 @@ class CustomInstallGUI(QMainWindow):
             if not custom_install.check_for_id0():
                 raise Exception(f'SD 卡的 “Nintendo 3DS” 文件夹中找不到 id0 {custom_install.crypto.id0.hex()} 文件夹。\n'
                             f'\n'
-                            f'在使用 custom-install 前，你应先确保这张 SD 卡的格式为 FAT32，且插入主机开机过一次。\n'
+                            f'在使用 Tulip3DS 前，你应先确保这张 SD 卡的格式为 FAT32，且插入主机开机过一次。\n'
                             f'\n'
                             f'或者，请确保你使用了正确的 movable.sed 文件。')
 
@@ -2162,9 +2095,9 @@ class CustomInstallGUI(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    icon = QIcon(file_parent + '/logo.ico')
+    icon = QIcon(file_parent + '/bin/logo_small.png')
     app.setWindowIcon(icon)
-    window = CustomInstallGUI()
+    window = Tulip3DSGUI()
     window.show()
     sys.exit(app.exec())
 

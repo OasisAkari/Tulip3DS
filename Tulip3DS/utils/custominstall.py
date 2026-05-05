@@ -3,26 +3,24 @@
 # custom-install is copyright (c) 2019-2020 Ian Burgwin
 # This file is licensed under The MIT License (MIT).
 # You can find the full license text in LICENSE.md in the root of this project.
+import gzip
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import traceback
-from argparse import ArgumentParser
 from enum import Enum
 from glob import glob
-import gzip
-from os import makedirs, rename, scandir
-from os.path import dirname, join, isdir, isfile, exists
-from random import randint
 from hashlib import sha256
+from os import makedirs, rename, scandir
+from os.path import dirname, join, isdir, isfile, exists, abspath
 from pprint import pformat
+from random import randint
 from shutil import copyfile, copy2, rmtree
-import sys
 from sys import platform, executable
 from tempfile import TemporaryDirectory
-from traceback import format_exception
 from typing import BinaryIO, TYPE_CHECKING
-import subprocess
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -36,6 +34,7 @@ from pyctr.type.cia import CIAReader, CIAError
 from pyctr.type.ncch import NCCHSection
 from pyctr.type.tmd import TitleMetadataError
 from pyctr.util import roundup
+from pathlib import Path
 
 if platform == 'msys':
     platform = 'win32'
@@ -50,12 +49,9 @@ else:
 CI_VERSION = '2.1'
 
 # used to run the save3ds_fuse binary next to the script
-frozen = getattr(sys, 'frozen', False)
-script_dir: str
-if frozen:
-    script_dir = dirname(executable).replace('\\', '/')
-else:
-    script_dir = dirname(__file__).replace('\\', '/')
+file_parent = dirname(abspath(__file__))
+current_path = Path(file_parent)
+script_path = current_path.parent
 
 # missing contents are replaced with 0xFFFFFFFF in the cmd file
 CMD_MISSING = b'\xff\xff\xff\xff'
@@ -66,8 +62,8 @@ TITLE_ALIGN_SIZE = 0x8000
 # size to read at a time when copying files
 READ_SIZE = 0x200000
 
-# version for cifinish.bin
-CIFINISH_VERSION = 3
+# version for tufinish.bin
+TUFINISH_VERSION = 3
 
 
 # Placeholder for SDPathErrors
@@ -75,7 +71,7 @@ class SDPathError(Exception):
     pass
 
 
-class InvalidCIFinishError(Exception):
+class InvalidTUFinishError(Exception):
     pass
 
 
@@ -109,12 +105,12 @@ def get_free_space(path: 'Union[PathLike, bytes, str]'):
     return free_bytes
 
 
-def load_cifinish(path: 'Union[PathLike, bytes, str]'):
+def load_tufinish(path: 'Union[PathLike, bytes, str]'):
     try:
         with open(path, 'rb') as f:
             header = f.read(0x10)
-            if header[0:8] != b'CIFINISH':
-                raise InvalidCIFinishError('CIFINISH magic not found')
+            if header[0:8] != b'TUFINISH':
+                raise InvalidTUFinishError('TUFINISH magic not found')
             version = int.from_bytes(header[0x8:0xC], 'little')
             count = int.from_bytes(header[0xC:0x10], 'little')
             data = {}
@@ -123,7 +119,7 @@ def load_cifinish(path: 'Union[PathLike, bytes, str]'):
                     # ignoring the titlekey and common key index, since it's not useful in this scenario
                     raw_entry = f.read(0x30)
                     if len(raw_entry) != 0x30:
-                        raise InvalidCIFinishError(f'title entry is not 0x30 (version {version})')
+                        raise InvalidTUFinishError(f'title entry is not 0x30 (version {version})')
 
                     title_magic = raw_entry[0xA:0x10]
                     title_id = int.from_bytes(raw_entry[0:8], 'little')
@@ -135,7 +131,7 @@ def load_cifinish(path: 'Union[PathLike, bytes, str]'):
                     # there wasn't a version of custom-install-finalize that really accepted this version
                     raw_entry = f.read(0x20)
                     if len(raw_entry) != 0x20:
-                        raise InvalidCIFinishError(f'title entry is not 0x20 (version {version})')
+                        raise InvalidTUFinishError(f'title entry is not 0x20 (version {version})')
 
                     title_magic = raw_entry[0:6]
                     title_id = int.from_bytes(raw_entry[0x6:0xE], 'little')
@@ -145,7 +141,7 @@ def load_cifinish(path: 'Union[PathLike, bytes, str]'):
                 elif version == 3:
                     raw_entry = f.read(0x20)
                     if len(raw_entry) != 0x20:
-                        raise InvalidCIFinishError(f'title entry is not 0x20 (version {version})')
+                        raise InvalidTUFinishError(f'title entry is not 0x20 (version {version})')
 
                     title_magic = raw_entry[0:6]
                     title_id = int.from_bytes(raw_entry[0x8:0x10], 'little')
@@ -153,7 +149,7 @@ def load_cifinish(path: 'Union[PathLike, bytes, str]'):
                     seed = raw_entry[0x10:0x20]
 
                 else:
-                    raise InvalidCIFinishError(f'unknown version {version}')
+                    raise InvalidTUFinishError(f'unknown version {version}')
 
                 if title_magic == b'TITLE\0':
                     data[title_id] = {'seed': seed if has_seed else None}
@@ -164,12 +160,12 @@ def load_cifinish(path: 'Union[PathLike, bytes, str]'):
         return {}
 
 
-def save_cifinish(path: 'Union[PathLike, bytes, str]', data: dict):
+def save_tufinish(path: 'Union[PathLike, bytes, str]', data: dict):
     with open(path, 'wb') as out:
         entries = sorted(data.items())
 
-        out.write(b'CIFINISH')
-        out.write(CIFINISH_VERSION.to_bytes(4, 'little'))
+        out.write(b'TUFINISH')
+        out.write(TUFINISH_VERSION.to_bytes(4, 'little'))
         out.write(len(entries).to_bytes(4, 'little'))
 
         for tid, data in entries:
@@ -206,7 +202,7 @@ def get_install_size(title: 'Union[CIAReader, CDNReader]'):
 
 
 class CustomInstall:
-    def __init__(self, *, movable, sd, cifinish_out=None, overwrite_saves=False, skip_contents=False,
+    def __init__(self, *, movable, sd, tufinish_out=None, overwrite_saves=False, skip_contents=False,
                  force_install=False,
                  boot9=None, seeddb=None):
         self.event = Events()
@@ -219,7 +215,7 @@ class CustomInstall:
         self.sd = sd
         self.skip_contents = skip_contents
         self.overwrite_saves = overwrite_saves
-        self.cifinish_out = cifinish_out
+        self.tufinish_out = tufinish_out
         self.movable = movable
         self.force_install = force_install
 
@@ -282,10 +278,7 @@ class CustomInstall:
         return isdir(sd_path)
 
     def start(self):
-        if frozen:
-            save3ds_fuse_path = join(script_dir, 'bin', 'save3ds_fuse')
-        else:
-            save3ds_fuse_path = join(script_dir, 'bin', platform, 'save3ds_fuse')
+        save3ds_fuse_path = join(script_path, 'bin', platform, 'save3ds_fuse')
         if is_windows:
             save3ds_fuse_path += '.exe'
         if not isfile(save3ds_fuse_path):
@@ -304,19 +297,19 @@ class CustomInstall:
         id1 = id1s[0]
         sd_path = join(sd_path, id1)
 
-        if self.cifinish_out:
-            cifinish_path = self.cifinish_out
+        if self.tufinish_out:
+            tufinish_path = self.tufinish_out
         else:
-            cifinish_path = join(self.sd, 'cifinish.bin')
+            tufinish_path = join(self.sd, 'tufinish.bin')
 
         try:
-            cifinish_data = load_cifinish(cifinish_path)
-        except InvalidCIFinishError as e:
+            tufinish_data = load_tufinish(tufinish_path)
+        except InvalidTUFinishError as e:
             self.log(f'{type(e).__qualname__}: {e}')
-            self.log(f'{cifinish_path} 是损坏的！\n'
+            self.log(f'{tufinish_path} 是损坏的！\n'
                      f'这可能意味着 SD 卡或其文件系统出了问题，请使用磁盘检查工具检查问题。\n'
-                     f'这也可能是 custom-install 自身的问题。\n'
-                     f'请关闭本程序以防止更大的问题出现，但是如果你还想再试试，请删除 SD 卡下的 cifinish.bin，然后再试。')
+                     f'这也可能是 Tulip3DS 自身的问题。\n'
+                     f'请关闭本程序以防止更大的问题出现，但是如果你还想再试试，请删除 SD 卡下的 tufinish.bin，然后再试。')
             return None, False, 0
 
         db_path = join(sd_path, 'dbs')
@@ -324,7 +317,7 @@ class CustomInstall:
         importdb_path = join(db_path, 'import.db')
         if not isfile(titledb_path):
             makedirs(db_path, exist_ok=True)
-            with gzip.open(join(script_dir, 'title.db.gz')) as f:
+            with gzip.open(script_path / 'bin' / 'title.db.gz') as f:
                 tdb = f.read()
 
             self.log(f'创建 title.db 中...')
@@ -353,7 +346,7 @@ class CustomInstall:
 
             del tdb
 
-        with TemporaryDirectory(suffix='-custom-install') as tempdir:
+        with TemporaryDirectory(suffix='-tulip3ds') as tempdir:
             # set up the common arguments for the two times we call save3ds_fuse
             save3ds_fuse_common_args = [
                 save3ds_fuse_path,
@@ -399,7 +392,7 @@ class CustomInstall:
                     self.event.on_cia_start(idx)
                     self.event.update_status(path, InstallStatus.Starting)
 
-                    temp_title_root = join(self.sd, f'ci-install-temp-{cia.tmd.title_id}-{randint(0, 0xFFFFFFFF):08x}')
+                    temp_title_root = join(self.sd, f'tu-install-temp-{cia.tmd.title_id}-{randint(0, 0xFFFFFFFF):08x}')
                     makedirs(temp_title_root, exist_ok=True)
 
                     tid_parts = (cia.tmd.title_id[0:8], cia.tmd.title_id[8:16])
@@ -433,11 +426,11 @@ class CustomInstall:
 
                     # this is where the final directory will be moved
                     tidhigh_root = join(sd_path, 'title', tid_parts[0]).replace('\\', '/')
-                    falisafe_root = join('/ci-pending/', tidhigh_root)
+                    falisafe_root = join('/tu-pending/', tidhigh_root)
                     # get the title root where all the contents will be
 
                     title_root = join(sd_path, 'title', *tid_parts).replace('\\', '/')
-                    falisafe_title_root = join('/ci-pending/', title_root)
+                    falisafe_title_root = join('/tu-pending/', title_root)
 
                     content_root = join(title_root, 'content')
                     # generate the path used for the IV
@@ -636,10 +629,10 @@ class CustomInstall:
                             self.event.update_status(path, InstallStatus.Failed)
                             continue
 
-                    cifinish_data[int(cia.tmd.title_id, 16)] = {'seed': (get_seed(cia.contents[0].program_id) if cia.contents[0].flags.uses_seed else None)}
+                    tufinish_data[int(cia.tmd.title_id, 16)] = {'seed': (get_seed(cia.contents[0].program_id) if cia.contents[0].flags.uses_seed else None)}
 
                     # This is saved regardless if any titles were installed, so the file can be upgraded just in case.
-                    save_cifinish(cifinish_path, cifinish_data)
+                    save_tufinish(tufinish_path, tufinish_data)
 
                     with open(join(tempdir, cia.tmd.title_id), 'wb') as o:
                         o.write(b''.join(title_info_entry_data))
@@ -685,20 +678,20 @@ class CustomInstall:
                     self.log(f'检测到已安装了 {application_count} 个应用。', 1)
                     self.log('主菜单仅会显示 300 个应用。', 1)
                     self.log('需要删除某些应用（应用更新和 DLC 除外）才能使安装的应用显示。', 1)
-                finalize_3dsx_orig_path = join(script_dir, 'custom-install-finalize.3dsx')
-                hb_dir = join(self.sd, '3ds')
-                finalize_3dsx_path = join(hb_dir, 'custom-install-finalize.3dsx').replace('\\', '/')
+                finalize_3dsx_orig_path = script_path / 'bin' / 'Tulip3DS-Client.cia'
+                self.log(str(finalize_3dsx_orig_path))
+
+                finalize_3dsx_path = Path(self.sd) / 'Tulip3DS-Client.cia'
                 if isfile(finalize_3dsx_orig_path):
-                    self.log('复制完成程序到' + finalize_3dsx_path)
-                    makedirs(hb_dir, exist_ok=True)
+                    self.log('复制完成程序到' + str(finalize_3dsx_path))
                     copyfile(finalize_3dsx_orig_path, finalize_3dsx_path)
                     copied = True
 
                 self.log('最后一步：')
-                self.log('通过 Homebrew Launcher 运行 custom-install-finalize 程序。')
+                self.log('运行 Tulip3DS Client 程序。')
                 self.log('这将会为主机安装 ticket 和 seed（如果需要的话）。')
                 if copied:
-                    self.log('custom-install-finalize 已被复制到 SD 卡。')
+                    self.log('Tulip3DS Client 已被复制到 SD 卡。')
 
             return install_state, copied, application_count
 
@@ -742,64 +735,3 @@ class CustomInstall:
         self.log_lines.append(msg_with_type)
         self.event.on_log_msg(msg_with_type, end=end)
         return msg_with_type
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser(description='Install a CIA to the SD card for a Nintendo 3DS system.')
-    parser.add_argument('cia', help='CIA files', nargs='+')
-    parser.add_argument('-m', '--movable', help='movable.sed file', required=True)
-    parser.add_argument('-b', '--boot9', help='boot9 file')
-    parser.add_argument('-s', '--seeddb', help='seeddb file')
-    parser.add_argument('--sd', help='path to SD root', required=True)
-    parser.add_argument('--skip-contents', help="don't add contents, only add title info entry", action='store_true')
-    parser.add_argument('--overwrite-saves', help='overwrite existing save files', action='store_true')
-    parser.add_argument('--cifinish-out', help='path for cifinish.bin file, defaults to (SD root)/cifinish.bin')
-
-    print(f'custom-install {CI_VERSION} - https://github.com/ihaveamac/custom-install')
-    args = parser.parse_args()
-
-    installer = CustomInstall(boot9=args.boot9,
-                              seeddb=args.seeddb,
-                              movable=args.movable,
-                              sd=args.sd,
-                              overwrite_saves=args.overwrite_saves,
-                              cifinish_out=args.cifinish_out,
-                              skip_contents=(args.skip_contents or False))
-
-    def log_handle(msg, end='\n'):
-        print(msg, end=end)
-    
-    def percent_handle(total_percent, total_read, size):
-        installer.log(f' {total_percent:>5.1f}%  {total_read:>.1f} MiB / {size:.1f} MiB\r', end='')
-
-    def error(exc):
-        for line in format_exception(*exc):
-            for line2 in line.split('\n')[:-1]:
-                installer.log(line2)
-
-    installer.event.on_log_msg += log_handle
-    installer.event.update_percentage += percent_handle
-    installer.event.on_error += error
-
-    if not installer.check_for_id0():
-        installer.event.on_error(f'Could not find id0 directory {installer.crypto.id0.hex()} '
-                                 f'inside Nintendo 3DS directory.')
-
-    installer.prepare_titles(args.cia)
-
-    if not args.skip_contents:
-        total_size, free_space = installer.check_size()
-        if total_size > free_space:
-            installer.event.on_log_msg(f'Not enough free space.\n'
-                                       f'Combined title install size: {total_size / (1024 * 1024):0.2f} MiB\n'
-                                       f'Free space: {free_space / (1024 * 1024):0.2f} MiB')
-            sys.exit(1)
-
-    result, copied_3dsx, application_count = installer.start()
-    if result is False:
-        # save3ds_fuse failed
-        installer.log('NOTE: Once save3ds_fuse is fixed, run the same command again with --skip-contents')
-    if application_count >= 300:
-        installer.log(f'\n\nWarning: {application_count} installed applications were detected.\n'
-                      f'The HOME Menu will only show 300 icons.\n'
-                      f'Some applications (not updates or DLC) will need to be deleted.')

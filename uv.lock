@@ -17,33 +17,6 @@ wheels = [
 ]
 
 [[package]]
-name = "custom-install"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "comtypes" },
-    { name = "events" },
-    { name = "nuitka", extra = ["onefile"] },
-    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "pillow", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "pyaes" },
-    { name = "pyctr" },
-    { name = "pyside6", version = "6.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "pyside6", version = "6.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "comtypes", specifier = ">=1.4.16" },
-    { name = "events", specifier = "==0.4" },
-    { name = "nuitka", extras = ["onefile"], specifier = ">=4.0.8" },
-    { name = "pillow", specifier = ">=11.3.0" },
-    { name = "pyaes", specifier = ">=1.6.1" },
-    { name = "pyctr", specifier = ">=0.4,<0.6" },
-    { name = "pyside6" },
-]
-
-[[package]]
 name = "events"
 version = "0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -484,6 +457,33 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f5/96/771a6e2b530f725303d16d78a321fa4876b98b4f3615c9851880df8c1a43/shiboken6-6.11.0-cp310-abi3-manylinux_2_39_aarch64.whl", hash = "sha256:a10dc7718104ea2dc15d5b0b96909b77162ce1c76fcc6968e6df692b947a00e9", size = 267456, upload-time = "2026-03-23T12:47:08.689Z" },
     { url = "https://files.pythonhosted.org/packages/72/f7/44c0c42c3f5f29dec457fd46ea0552174bcb8aa75becf03bbd90308ba07b/shiboken6-6.11.0-cp310-abi3-win_amd64.whl", hash = "sha256:483ff78a73c7b3189ca924abc694318084f078bcfeaffa68e32024ff2d025ee1", size = 1222132, upload-time = "2026-03-23T12:47:10.143Z" },
     { url = "https://files.pythonhosted.org/packages/fb/99/6e5ee21db2d6af84bbbd7d871d441dafeb069c6de5667b1aa49891a77c66/shiboken6-6.11.0-cp310-abi3-win_arm64.whl", hash = "sha256:3bd76cf56105ab2d62ecaff630366f11264f69b88d488f10f048da9a065781f4", size = 1783186, upload-time = "2026-03-23T12:47:11.832Z" },
+]
+
+[[package]]
+name = "tulip3ds"
+version = "1.0.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "comtypes" },
+    { name = "events" },
+    { name = "nuitka", extra = ["onefile"] },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pillow", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pyaes" },
+    { name = "pyctr" },
+    { name = "pyside6", version = "6.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "pyside6", version = "6.11.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "comtypes", specifier = ">=1.4.16" },
+    { name = "events", specifier = "==0.4" },
+    { name = "nuitka", extras = ["onefile"], specifier = ">=4.0.8" },
+    { name = "pillow", specifier = ">=11.3.0" },
+    { name = "pyaes", specifier = ">=1.6.1" },
+    { name = "pyctr", specifier = ">=0.4,<0.6" },
+    { name = "pyside6" },
 ]
 
 [[package]]

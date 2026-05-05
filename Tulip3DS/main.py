@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
                                QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
                                QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
-                               QHeaderView)
+                               QHeaderView, QComboBox, QSizePolicy)
 from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
 from pyctr.crypto.engine import b9_paths, BootromNotFoundError
 from pyctr.type.cdn import CDNError, CDNReader
@@ -619,7 +619,7 @@ class CompressedFileProcessor(QObject):
     def __init__(self, parent: 'Tulip3DSGUI'):
         super().__init__()
         if sys.platform == 'win32':
-            self.sevenzip_path = join(dirname(abspath(__file__)), sys.platform, '7za.exe')
+            self.sevenzip_path = join(dirname(abspath(__file__)), 'bin', sys.platform, '7za.exe')
         else:
             self.sevenzip_path = join(dirname(abspath(__file__)), sys.platform, '7zz')
         self.process = None
@@ -631,9 +631,9 @@ class CompressedFileProcessor(QObject):
 
         self.unrar_path = None
         if sys.platform == 'win32':
-            self.unrar_path = join(dirname(abspath(__file__)), sys.platform, 'UnRAR.exe')
+            self.unrar_path = join(dirname(abspath(__file__)), 'bin', sys.platform, 'UnRAR.exe')
         else:
-            self.unrar_path = join(dirname(abspath(__file__)), sys.platform, 'unrar')
+            self.unrar_path = join(dirname(abspath(__file__)), 'bin', sys.platform, 'unrar')
         self.current_program_type = '7z'
         # partial output accumulator for streams that update via carriage returns
         self._partial_output = ''
@@ -928,28 +928,25 @@ class Tulip3DSGUI(QMainWindow):
         # Setup UI components
         # SD Root picker
         sd_layout = QHBoxLayout()
-        self.sd_label = QLabel('SD 卡根目录：')
-        self.sd_path = QLineEdit()
-        self.sd_button = QPushButton('选择')
-        self.sd_button.clicked.connect(self.select_sd_root)
+        self.sd_label = QLabel('主机内存卡：')
+        self.sd_combo = QComboBox()
+        self.sd_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
         sd_layout.addWidget(self.sd_label)
-        sd_layout.addWidget(self.sd_path)
-        sd_layout.addWidget(self.sd_button)
-        self.layout.addLayout(sd_layout)
+        sd_layout.addWidget(self.sd_combo)
 
         # Movable.sed picker
-        movable_layout = QHBoxLayout()
-        self.movable_label = QLabel('movable.sed 文件：')
-        self.movable_path = QLineEdit()
-        if default_movable_sed_path:
-            self.movable_path.setText(default_movable_sed_path)
-        self.movable_button = QPushButton('选择')
-        self.movable_button.clicked.connect(lambda: self.select_file('movable.sed', '*.sed'))
-        movable_layout.addWidget(self.movable_label)
-        movable_layout.addWidget(self.movable_path)
-        movable_layout.addWidget(self.movable_button)
-        self.layout.addLayout(movable_layout)
+        self.movable_label = QLabel('安装的系统：')
+        self.movable_combo = QComboBox()
+        self.movable_combo.setEnabled(False)
+        self.movable_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sd_layout.addWidget(self.movable_label)
+        sd_layout.addWidget(self.movable_combo)
 
+        self.sd_refresh_button = QPushButton('刷新')
+        self.sd_refresh_button.clicked.connect(self.refresh_sd_combo)
+        sd_layout.addWidget(self.sd_refresh_button)
+        self.layout.addLayout(sd_layout)
 
         button_layout = QHBoxLayout()
 
@@ -1061,8 +1058,8 @@ class Tulip3DSGUI(QMainWindow):
         self.layout.addLayout(status_info_layout)
 
         # textChanged signals
-        self.sd_path.textChanged.connect(self.update_button_states)
-        self.movable_path.textChanged.connect(self.update_button_states)
+        self.sd_combo.currentTextChanged.connect(self.on_sd_combo_changed)
+        self.movable_combo.currentTextChanged.connect(self.update_button_states)
 
         # Setup signals
         self.signals.log_signal.connect(self.on_log)
@@ -1099,6 +1096,10 @@ class Tulip3DSGUI(QMainWindow):
 
         self.enabled_button = False
 
+        self.refresh_sd_combo()
+        self.sd_combo.installEventFilter(self)
+        self.movable_combo.installEventFilter(self)
+
 
     def show_about(self):
         if not self.dialog:
@@ -1106,49 +1107,100 @@ class Tulip3DSGUI(QMainWindow):
         self.dialog.show()
         self.dialog.setFixedSize(self.dialog.size())
 
-    def select_sd_root(self):
-        qurl = QUrl.fromLocalFile(str(Path.home()))
+    def eventFilter(self, obj, event):
+        if event.type() == event.Type.FocusIn:
+            if obj in (self.sd_combo, self.movable_combo):
+                self.refresh_sd_combo()
+                if self.sd_combo.currentText():
+                    self.refresh_movable_combo()
+        return super().eventFilter(obj, event)
+
+    def refresh_sd_combo(self):
+        self.sd_combo.clear()
+        drives = self._scan_drives()
+        for drive_info in drives:
+            self.sd_combo.addItem(drive_info['display'], drive_info['path'])
+
+    def _scan_drives(self):
+        drives = []
         if is_windows:
-            qurl = QUrl("clsid:0AC0837C-BBF8-452A-850D-79D08E667CA7")
-        directory = QFileDialog.getExistingDirectoryUrl(self, "选择 SD 卡根目录", qurl)
-        directory = directory.toLocalFile() if directory else None
-        if directory:
-            finish_path = join(directory, 'finish.bin')
+            import string
+            for letter in string.ascii_uppercase:
+                drive_path = f'{letter}:\\'
+                try:
+                    if isdir(drive_path):
+                        tulip_path = join(drive_path, '3DS', 'Tulip3DS')
+                        if isdir(tulip_path):
+                            drives.append({
+                                'path': drive_path,
+                                'display': f'{drive_path}'
+                            })
+                except (OSError, PermissionError):
+                    continue
+        else:
+            import os
+            volumes_path = '/Volumes'
+            try:
+                if not isdir(volumes_path):
+                    return drives
+                for volume_name in os.listdir(volumes_path):
+                    volume_path = join(volumes_path, volume_name)
+                    try:
+                        if not isdir(volume_path):
+                            continue
+                        tulip_path = join(volume_path, '3DS', 'Tulip3DS')
+                        if isdir(tulip_path):
+                            drives.append({
+                                'path': volume_path,
+                                'display': f'{volume_name}'
+                            })
+                    except (OSError, PermissionError):
+                        continue
+            except (OSError, PermissionError):
+                pass
+        return drives
+
+    def refresh_movable_combo(self):
+        self.movable_combo.clear()
+        sd_path = self.sd_combo.currentData()
+        if not sd_path:
+            self.movable_combo.setEnabled(False)
+            return
+        tulip_path = join(sd_path, '3DS', 'Tulip3DS')
+        has_real = isfile(join(tulip_path, 'sysnand_movable.sed'))
+        has_virtual = isfile(join(tulip_path, 'emunand_movable.sed'))
+        if has_real:
+            self.movable_combo.addItem('真实系统', 'sysnand_movable.sed')
+        if has_virtual:
+            self.movable_combo.addItem('虚拟系统', 'emunand_movable.sed')
+        if has_real or has_virtual:
+            self.movable_combo.setEnabled(True)
+        else:
+            self.movable_combo.setEnabled(False)
+
+    def on_sd_combo_changed(self):
+        self.refresh_movable_combo()
+        sd_path = self.sd_combo.currentData()
+        if sd_path:
+            finish_path = join(sd_path, 'tufinish.bin')
             try:
                 load_tufinish(finish_path)
             except InvalidTUFinishError:
                 QMessageBox.critical(self, '错误',
                                      f'卡内的{finish_path}是损坏的！\n\n'
-                                    f'这可能代表着 SD 卡或其文件系统出错。请使用磁盘检查工具查找错误。\n'
-                                    f'这也可能是 custom-install 的问题（虽然不太可能）。\n\n'
-                                    f'请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 finish.bin，然后重新启动 custom-install。')
+                                     f'这可能代表着 SD 卡或其文件系统出错。请使用磁盘检查工具查找错误。\n'
+                                     f'这也可能是 Tulip3DS 的问题（虽然不太可能）。\n\n'
+                                     f'请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 tufinish.bin，然后重新启动 Tulip3DS。')
                 return
-
-            self.sd_path.setText(directory)
-            self.check_b9_loaded()
             load_seeddb(seeddb_paths[0])
-            # Auto-detect files
-            for filename in ['movable.sed']:
-                self.auto_detect_file(directory, filename)
         self.update_button_states()
 
-
-    def auto_detect_file(self, sd_root: str, filename: str) -> Optional[str]:
-        paths = [join(sd_root, 'gm9', 'out', filename), join(sd_root, filename)]
-        found_path = find_first_file(paths)
-        if found_path:
-            self.log(f'从 SD 卡的 {found_path} 找到了 {filename}')
-            if filename == 'movable.sed':
-                self.movable_path.setText(found_path)
-            return found_path
-        return None
-
-    def select_file(self, file_type: str, file_filter: str):
-        file_name, _ = QFileDialog.getOpenFileName(self, f"选择 {file_type}", "", f"{file_type} ({file_filter})")
-        if file_name:
-            if file_type == 'movable.sed':
-                self.movable_path.setText(file_name.replace('\\', '/'))
-        self.update_button_states()
+    def get_selected_movable_path(self):
+        sd_path = self.sd_combo.currentData()
+        movable_file = self.movable_combo.currentData()
+        if not sd_path or not movable_file:
+            return None
+        return join(sd_path, '3DS', 'Tulip3DS', movable_file)
 
     def _add_cias(self, paths):
         if not self.enabled_button:
@@ -1554,7 +1606,7 @@ class Tulip3DSGUI(QMainWindow):
                 title_size = get_install_size(reader)
 
                 # Check if adding this CIA would exceed available SD card capacity
-                sd_path = self.sd_path.text()
+                sd_path = self.sd_combo.currentData()
                 if sd_path and isdir(sd_path):
                     try:
                         usage = shutil.disk_usage(sd_path)
@@ -1747,7 +1799,7 @@ class Tulip3DSGUI(QMainWindow):
 
     def update_info_label(self):
         """Update the info label with SD path info and total application size."""
-        sd_path = self.sd_path.text()
+        sd_path = self.sd_combo.currentData()
         total_str, free_str = get_disk_info(sd_path, self.log)
 
         total_app_size = self.get_total_app_size()
@@ -1762,8 +1814,8 @@ class Tulip3DSGUI(QMainWindow):
 
     def _update_button_states(self):
         self.enabled_button = all([
-                       self.sd_path.text(),
-                       self.movable_path.text(),
+                       bool(self.sd_combo.currentData()),
+                       bool(self.movable_combo.currentData()),
                        ])
 
         self.switch_button_states(self.enabled_button)
@@ -1862,7 +1914,7 @@ class Tulip3DSGUI(QMainWindow):
         tex = '已完成安装。\n'
         if copied:
             tex += "Tulip3DS Client 已被复制到 SD 卡。\n"
-        root_ = self.sd_path.text()
+        root_ = self.sd_combo.currentData()
         lst_dir = os.listdir(root_)
         if 'boot.firm' not in lst_dir or 'boot.3dsx' not in lst_dir:
             tex += ("重要警告：SD 卡根目录中未找到 boot.firm 或 boot.3dsx 文件。\n"
@@ -1917,11 +1969,11 @@ class Tulip3DSGUI(QMainWindow):
             self.log("已禁用强制安装模式。")
 
     def on_export_finalize_signal(self):
-        if not self.sd_path.text():
+        if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
         src = Path(file_parent) / 'Tulip3DS-Client.cia'
-        dst = Path(self.sd_path.text()) / 'Tulip3DS-Client.cia'
+        dst = Path(self.sd_combo.currentData()) / 'Tulip3DS-Client.cia'
         try:
             shutil.copy(src, dst)
             QMessageBox.information(self, "成功", f"Tulip3DS Client 已导出到 {dst}。")
@@ -1930,10 +1982,10 @@ class Tulip3DSGUI(QMainWindow):
             self.log(f"导出 Tulip3DS Client 失败：{str(e)}")
 
     def on_recover_pending_install_signal(self):
-        if not self.sd_path.text():
+        if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        pending_path = Path(self.sd_path.text()) / 'tu-pending'
+        pending_path = Path(self.sd_combo.currentData()) / 'tu-pending'
         if not pending_path.exists() or not pending_path.is_dir():
             QMessageBox.warning(self, "错误", f"未找到 tu-pending 文件夹：{pending_path}")
             return
@@ -1949,11 +2001,11 @@ class Tulip3DSGUI(QMainWindow):
 
 
     def on_delete_corrupted_files_signal(self):
-        if not self.sd_path.text():
+        if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
         deleted = False
-        for p in Path(self.sd_path.text()).glob('tu-install-temp*'):
+        for p in Path(self.sd_combo.currentData()).glob('tu-install-temp*'):
             deleted = True
             if p.is_dir():
                 try:
@@ -2017,12 +2069,12 @@ class Tulip3DSGUI(QMainWindow):
             self.switch_button_states(False)
             self.log("准备安装中...")
             # Get the SD root path
-            sd_path = self.sd_path.text()
+            sd_path = self.sd_combo.currentData()
             if not sd_path:
                 raise Exception("未指定 SD 卡根目录")
 
             # Get the movable.sed path
-            movable_path = self.movable_path.text()
+            movable_path = self.get_selected_movable_path()
             if not movable_path:
                 raise Exception("未指定 movable.sed")
 

@@ -27,6 +27,10 @@ seeddb.bin
 ci_qt.build
 ci_qt.onefile-build
 ci_qt.dist
+
+main.build
+main.onefile-build
+main.dist
 7zz
 7zr.exe
 unrar

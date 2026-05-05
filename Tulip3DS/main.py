@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 import traceback
+import json
 from datetime import datetime
 from io import BytesIO
 from os.path import abspath, basename, dirname, join, isfile, isdir
@@ -11,14 +12,16 @@ from pathlib import Path
 from threading import Thread, Lock
 from threading import Timer
 from time import sleep, time
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl, QProcess
-from PySide6.QtGui import QPixmap, QIcon, QDragEnterEvent
+from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl, QProcess, QTimer
+from PySide6.QtGui import QPixmap, QIcon, QDragEnterEvent, QDesktopServices, QPainter, QColor, QPen
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
                                QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
-                               QTextEdit, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
+                               QTextEdit, QTextBrowser, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
                                QHeaderView, QComboBox, QSizePolicy)
 from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
 from pyctr.crypto.engine import b9_paths, BootromNotFoundError
@@ -35,7 +38,7 @@ from utils.custominstall import CustomInstall, load_tufinish, InvalidTUFinishErr
 file_parent = dirname(abspath(__file__))
 current_path = Path(file_parent)
 
-TU_VERSION = '1.0'
+TU_VERSION = '1.6'
 
 
 # automatically load boot9 if it's in the current directory
@@ -399,23 +402,79 @@ class InstallSignals(QObject):
 signals = InstallSignals()
 
 
+class BadgeButton(QPushButton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._badge_visible = False
+
+    def setBadgeVisible(self, visible: bool):
+        visible = bool(visible)
+        if self._badge_visible != visible:
+            self._badge_visible = visible
+            self.update()
+
+    def badgeVisible(self) -> bool:
+        return self._badge_visible
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._badge_visible:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        diameter = 8
+        margin = 6
+        x = max(margin, self.width() - diameter - margin)
+        y = margin
+        rect = self.rect().adjusted(x, y, -(self.width() - x - diameter), -(self.height() - y - diameter))
+        painter.setPen(QPen(QColor("white"), 1))
+        painter.setBrush(QColor("#e53935"))
+        painter.drawEllipse(rect)
+
+
+class ThanksDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("致谢")
+        self.setMinimumSize(QSize(520, 360))
+
+        layout = QVBoxLayout(self)
+
+        text = QTextBrowser()
+        text.setOpenExternalLinks(True)
+        text.setHtml(
+            "<h3>致谢</h3>"
+            "<p>原程序作者：ihaveamac - "
+            "<a href='https://github.com/ihaveamac/custom-install'>"
+            "https://github.com/ihaveamac/custom-install</a></p>"
+            "<p>本程序GUI 参考了 chinnsenn 的实现："
+            "<a href='https://github.com/chinnsenn/custom-install/tree/safe-install'>"
+            "https://github.com/chinnsenn/custom-install/tree/safe-install</a></p>"
+            "<p>在此表示感谢。</p>"
+        )
+        layout.addWidget(text)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(self.close)
+        layout.addWidget(close_button)
+
+
 class AboutDialog(QDialog):
     def __init__(self, parent: 'Tulip3DSGUI'):
         super().__init__(parent)
+        self.parent = parent
         self.setWindowTitle("关于 Tulip3DS")
         self.setMinimumSize(QSize(300, 300))
 
         # Setup layout
-        layout = QVBoxLayout(self)
+        self.layout = QVBoxLayout(self)
 
         # Add text
         about_text = (
             f"<h2>Tulip3DS {TU_VERSION}</h2>"
             "<p>By OasisAkari （一只火狐） - <a href='https://stray-soul.com/'>https://stray-soul.com/</a></p>"
             "<p>禁止二次出售（如闲鱼等平台）与商用。</p>"
-            # "<p>原程序作者：ihaveamac - <a href='https://github.com/ihaveamac/custom-install'>https://github.com/ihaveamac/custom-install</a></p>"
-            # "<p>本 GUI 参考了 chinnsenn 的实现： <a href='https://github.com/chinnsenn/custom-install/tree/safe-install'>https://github.com/chinnsenn/custom-install/tree/safe-install</a></p>"
-            # "<p>在此表示感谢。</p>"
             "<p>如果你在使用过程中遇到了问题，请先检查一下使用教程：<a href='https://stray-soul.com/ci.html'>https://stray-soul.com/ci.html</a>"
             "<p>开源地址：<a href='https://github.com/OasisAkari/Tulip3DS'>https://github.com/OasisAkari/Tulip3DS</a></p>"
             "<p>生活不易，如果您觉得工具好用可以点击这里支持我：<a href='https://stray-soul.com/donate.html'>https://stray-soul.com/donate.html</a></p>"
@@ -423,12 +482,13 @@ class AboutDialog(QDialog):
 
         about_label = QLabel(about_text)
         about_label.setOpenExternalLinks(True)
-        layout.addWidget(about_label)
+        self.layout.addWidget(about_label)
+
 
         # Add force install checkbox
         self.force_install_checkbox = QCheckBox("强制安装（跳过哈希检查）")
         self.force_install_checkbox.setToolTip("如果你知道自己在做什么，可以启用此选项。")
-        layout.addWidget(self.force_install_checkbox)
+        self.layout.addWidget(self.force_install_checkbox)
 
         # Add a note about the force install checkbox
 
@@ -448,9 +508,23 @@ class AboutDialog(QDialog):
 
         self.force_install_checkbox.clicked.connect(force_install_changed_warning)
 
+        self.update_button = BadgeButton("检查更新")
+        self.layout.addWidget(self.update_button)
+        self.update_button.clicked.connect(self._on_update_button_clicked)
+        self._update_button_text()
+
+        thanks_button = QPushButton("致谢")
+        self.layout.addWidget(thanks_button)
+
+        def open_thanks_dialog():
+            dialog = ThanksDialog(self)
+            dialog.exec()
+
+        thanks_button.clicked.connect(open_thanks_dialog)
+
         # add export Tulip3DS Client button
         export_button = QPushButton("导出 Tulip3DS Client")
-        layout.addWidget(export_button)
+        self.layout.addWidget(export_button)
 
         def export_finalize():
             confirm = QMessageBox.question(
@@ -463,25 +537,27 @@ class AboutDialog(QDialog):
         export_button.clicked.connect(export_finalize)
 
         recover_button = QPushButton("恢复未完成的安装")
-        layout.addWidget(recover_button)
+        self.layout.addWidget(recover_button)
 
         def recover_pending_install():
             confirm = QMessageBox.question(
                 self, "恢复未完成的安装", "你确定要恢复未完成的安装吗？\n"
-                "这将会尝试从 SD 卡根目录的 tu-pending 文件夹中恢复上次未完成的安装。",
+                                          "这将会尝试从 SD 卡根目录的 tu-pending 文件夹中恢复上次未完成的安装。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if confirm == QMessageBox.StandardButton.Yes:
                 signals.recover_pending_install_signal.emit()
+
         recover_button.clicked.connect(recover_pending_install)
 
         # Add delete corrupted files button
         delete_button = QPushButton("删除损坏的文件")
-        layout.addWidget(delete_button)
+        self.layout.addWidget(delete_button)
+
         def delete_corrupted_files():
             confirm = QMessageBox.question(
                 self, "删除损坏的文件", "你确定要删除损坏的文件吗？\n"
-                "这将会尝试从 SD 卡根目录的 tu-install-temp 为前缀的文件夹中删除所有损坏的文件。",
+                                        "这将会尝试从 SD 卡根目录的 tu-install-temp 为前缀的文件夹中删除所有损坏的文件。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if confirm == QMessageBox.StandardButton.Yes:
@@ -492,24 +568,41 @@ class AboutDialog(QDialog):
         convert_button = QPushButton("转换 3DS / CCI 为 CIA 格式")
 
         def open_convert_dialog():
-            d = ConvertDialog(self, parent.log)
+            d = ConvertDialog(self, self.parent.log)
             d.show()
 
-        layout.addWidget(convert_button)
+        self.layout.addWidget(convert_button)
         convert_button.clicked.connect(open_convert_dialog)
-
 
         # Add close button
         close_button = QPushButton("关闭")
-        layout.addWidget(close_button)
+        self.layout.addWidget(close_button)
         close_button.clicked.connect(self.close)
 
-                # if is_mica_supported():
-                #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-                #     hwnd = int(self.winId())
-                #     ApplyMica(hwnd, MicaType.MICA)
+        # if is_mica_supported():
+        #     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        #     hwnd = int(self.winId())
+        #     ApplyMica(hwnd, MicaType.MICA)
 
+    def _update_button_text(self):
+        if self.parent._update_available:
+            self.update_button.setText(f"发现新版本：{self.parent._latest_version}")
+        else:
+            self.update_button.setText("检查更新")
+        self.update_button.setBadgeVisible(self.parent._update_available)
 
+    def _on_update_button_clicked(self):
+        if self.parent._update_available and self.parent._update_download_url:
+            QDesktopServices.openUrl(QUrl(self.parent._update_download_url))
+        else:
+            self.update_button.setText("检查中...")
+            self.update_button.setEnabled(False)
+            self.parent.check_for_updates()
+            QTimer.singleShot(5000, self._restore_update_button)
+
+    def _restore_update_button(self):
+        self._update_button_text()
+        self.update_button.setEnabled(True)
 
 
 class ListBoxDialog(QDialog):
@@ -894,6 +987,8 @@ class CompressedFileProcessor(QObject):
 
 
 class Tulip3DSGUI(QMainWindow):
+    update_check_result_signal = pyqtSignal(bool, str, str, str)
+
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
@@ -924,6 +1019,12 @@ class Tulip3DSGUI(QMainWindow):
         self._extract_password = None
         self._scanning = False
         self._extracting = False
+
+        # Update check state
+        self.update_check_result_signal.connect(self._on_update_check_finished)
+        self._latest_version = None
+        self._update_available = False
+        self._update_download_url = None
 
         # Setup UI components
         # SD Root picker
@@ -1034,7 +1135,7 @@ class Tulip3DSGUI(QMainWindow):
         self.start_button.clicked.connect(self.start_install)
         control_layout.addWidget(self.start_button)
 
-        self.about_button = QPushButton("关于")
+        self.about_button = BadgeButton("关于")
         self.about_button.clicked.connect(self.show_about)
         control_layout.addWidget(self.about_button)
 
@@ -1099,7 +1200,87 @@ class Tulip3DSGUI(QMainWindow):
         self.refresh_sd_combo()
         self.sd_combo.installEventFilter(self)
         self.movable_combo.installEventFilter(self)
+        QTimer.singleShot(500, self.check_for_updates)
 
+    def check_for_updates(self):
+        self.log("正在检查更新...")
+        Thread(target=self._check_for_updates_worker, daemon=True).start()
+
+    def _check_for_updates_worker(self):
+        try:
+            try:
+                url = "https://api.github.com/repos/OasisAkari/Tulip3DS/releases/latest"
+                request = Request(url, headers={
+                    "User-Agent": "Tulip3DS",
+                    "Accept": "application/vnd.github+json",
+                })
+                with urlopen(request, timeout=15) as response:
+                    data = response.read().decode('utf-8', errors='replace')
+                    release_info = json.loads(data)
+                latest_version = self._normalize_release_version(release_info.get('tag_name', ''))
+            except Exception as e:
+                url = "https://stray-soul.com/statics/assets/files/TUVERSION"
+                request = Request(url, headers={
+                    "User-Agent": "Tulip3DS",
+                })
+                with urlopen(request, timeout=15) as response:
+                    release_info = response.read().decode('utf-8', errors='replace')
+                latest_version = self._normalize_release_version(release_info)
+            self.update_check_result_signal.emit(True, latest_version, 'https://stray-soul.com/ci.html', '')
+        except HTTPError as e:
+            self.update_check_result_signal.emit(False, '', '', f'HTTP {e.code}: {e.reason}')
+        except URLError as e:
+            self.update_check_result_signal.emit(False, '', '', f'网络错误：{e.reason}')
+        except Exception as e:
+            traceback.print_exc()
+            self.update_check_result_signal.emit(False, '', '', str(e))
+
+    def _on_update_check_finished(self, success: bool, latest_version: str, download_url: str, error_message: str):
+        if not success:
+            self.log(f"更新检查失败：{error_message}")
+            if self.dialog and hasattr(self.dialog, 'update_button'):
+                self.dialog.update_button.setEnabled(True)
+                self.dialog._update_button_text()
+            return
+
+        self._latest_version = latest_version
+        self.log(f"最新版本：{self._latest_version}")
+        self._update_download_url = download_url
+        self._update_available = self._compare_versions(self._latest_version, TU_VERSION) > 0
+        self._update_button_style()
+        if self.dialog and hasattr(self.dialog, '_update_button_text'):
+            self.dialog._update_button_text()
+            if hasattr(self.dialog, 'update_button'):
+                self.dialog.update_button.setEnabled(True)
+
+    def _normalize_release_version(self, tag: str) -> str:
+        tag = (tag or '').strip()
+        if not tag:
+            return ''
+        tag = tag.lstrip('vV')
+        match = re.search(r'(\d+(?:\.\d+)*)', tag)
+        return match.group(1) if match else tag
+
+    def _compare_versions(self, v1: str, v2: str) -> int:
+        def normalize(v):
+            return [int(x) for x in v.split('.')]
+        v1_parts = normalize(v1)
+        v2_parts = normalize(v2)
+        for i in range(max(len(v1_parts), len(v2_parts))):
+            p1 = v1_parts[i] if i < len(v1_parts) else 0
+            p2 = v2_parts[i] if i < len(v2_parts) else 0
+            if p1 > p2:
+                return 1
+            if p1 < p2:
+                return -1
+        return 0
+
+    def _update_button_style(self):
+        self.about_button.setBadgeVisible(self._update_available)
+        if self._update_available:
+            self.about_button.setToolTip(f"发现新版本：{self._latest_version}")
+        else:
+            self.about_button.setToolTip("")
 
     def show_about(self):
         if not self.dialog:
@@ -1857,7 +2038,7 @@ class Tulip3DSGUI(QMainWindow):
             timestamp = datetime.now().strftime('%H-%M-%S')
             logs_path = Path(os.path.abspath('.')) / 'logs'
             logs_path.mkdir(exist_ok=True)
-            save_path = logs_path / f'custom-install-{timestamp}.log'
+            save_path = logs_path / f'tulip3ds-{timestamp}.log'
             with open(save_path, 'w', encoding='utf-8') as f:
                 f.write(self.log_window.toPlainText())
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+import json
 import os
 import re
 import shutil
 import sys
 import traceback
-import json
 from datetime import datetime
 from io import BytesIO
 from os.path import abspath, basename, dirname, join, isfile, isdir
@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
                                QTextEdit, QTextBrowser, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
                                QHeaderView, QComboBox, QSizePolicy)
-from pyctr.crypto import MissingSeedError, CryptoEngine, load_seeddb
-from pyctr.crypto.engine import b9_paths, BootromNotFoundError
+from pyctr.crypto import CryptoEngine, load_seeddb
+from pyctr.crypto.engine import b9_paths
 from pyctr.type.cdn import CDNError, CDNReader
 from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
@@ -2005,11 +2005,15 @@ class Tulip3DSGUI(QMainWindow):
             return QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
         filePathList = e.mimeData().text()
         filePath = filePathList.split('\n')
+        self.log("放置了文件：" + str(filePath))
         cias = []
         dirs = []
         cards = []
         for p in filePath:
             p = p.replace('file:///', '', 1).strip()
+            if sys.platform == 'darwin':
+                p = '/' + p
+            self.log(str(os.path.exists(p)))
             if p and isfile(p):
                 if p.lower().endswith('.cia'):
                     cias.append(p)
@@ -2019,6 +2023,11 @@ class Tulip3DSGUI(QMainWindow):
                     cias.append(p)
             elif p and isdir(p):
                 dirs.append(p)
+            else:
+                self.log(p + '不是文件或文件夹，跳过。')
+        self.log("识别到的文件：" + str(cias))
+        self.log("识别到的文件夹：" + str(dirs))
+        self.log("识别到的游戏卡镜像：" + str(cards))
         if cias:
             self._add_cias(cias)
         if dirs:
@@ -2147,7 +2156,7 @@ class Tulip3DSGUI(QMainWindow):
         self.progress_bar_text.setText(f"正在安装第 {idx + 1} 个应用...")
         find_item = self.title_list.topLevelItem(idx)
         if find_item:
-            find_item.setText(4, statuses.get(InstallStatus.Starting))
+            find_item.setText(5, statuses.get(InstallStatus.Starting))
         if taskbar:
             self.finished_percent = idx * 100
             max_percentage = 100 * self.total_items
@@ -2168,7 +2177,7 @@ class Tulip3DSGUI(QMainWindow):
         # Find and update the item in the tree widget
         items = self.title_list.findItems(path, Qt.MatchFlag.MatchExactly, 1)
         if items:
-            items[0].setText(4, cn_text[status_text])
+            items[0].setText(5, cn_text[status_text])
 
     def on_installed_signal(self, lst: List[str], copied: bool, application_count: int):
         tex = '已完成安装。\n'

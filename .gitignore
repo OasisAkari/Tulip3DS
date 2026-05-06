@@ -24,13 +24,12 @@ venv/
 boot9.bin
 seeddb.bin
 
-ci_qt.build
-ci_qt.onefile-build
-ci_qt.dist
-
 main.build
 main.onefile-build
 main.dist
+Tulip3DS.app
+Tulip3DS.build
+Tulip3DS.dist
 7zz
 7zr.exe
 unrar
@@ -38,5 +37,6 @@ UnRAR.exe
 ci_qt.exe
 7za.exe
 Tulip3DS.exe
+nuitka-crash-report.xml
 
 test*

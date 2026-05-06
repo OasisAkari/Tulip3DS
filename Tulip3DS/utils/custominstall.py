@@ -609,6 +609,8 @@ class CustomInstall:
                     self.event.update_status(path, InstallStatus.Finishing)
                     if isdir(title_root):
                         self.log(f'正在从 {title_root} 移除原先的安装的文件中...')
+                        if platform == 'darwin':
+                            subprocess.run(['dot_clean', title_root])
                         rmtree(title_root, onerror=remove_readonly)
 
                     warning = False

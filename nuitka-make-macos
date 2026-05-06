@@ -1,0 +1,1 @@
+arch -x86_64 python -m nuitka Tulip3DS/main.py --output-filename=Tulip3DS --output-folder-name=Tulip3DS --enable-plugins=pyside6 --include-raw-dir=./Tulip3DS/bin/darwin=bin/darwin --include-raw-dir=./Tulip3DS/bin/common=bin/common --mode=app --macos-app-icon=logo_medium.png

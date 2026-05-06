@@ -42,10 +42,10 @@ TU_VERSION = '1.6'
 
 
 # automatically load boot9 if it's in the current directory
-b9_paths.insert(0, str(current_path / 'bin' / 'boot9.bin'))
+b9_paths.insert(0, str(current_path / 'bin' / 'common' / 'boot9.bin'))
 
 seeddb_paths = []
-seeddb_paths.insert(0, str(current_path / 'bin' / 'seeddb.bin'))
+seeddb_paths.insert(0, str(current_path / 'bin' / 'common' / 'seeddb.bin'))
 
 
 taskbar = None
@@ -574,6 +574,88 @@ class AboutDialog(QDialog):
         self.layout.addWidget(convert_button)
         convert_button.clicked.connect(open_convert_dialog)
 
+        def fix_multiple_id1_error():
+            confirm1 = QMessageBox.question(self,
+                                            "提示",
+                                            "本功能可以帮助你修复 SD 卡中存在多个 id1 文件夹导致的安装问题。\n\n"
+                                            "为了防止丢失数据，请备份好内存卡的 Nintendo 3DS 文件夹后再继续。",
+                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirm1 != QMessageBox.StandardButton.Yes:
+                return
+            confirm2 = QMessageBox.warning(self,
+                                           "提示",
+                                           "确认继续吗？\n\n"
+                                           "如果确认，主机的数据开机后将暂时不会显示，直到修复完成。",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirm2 == QMessageBox.StandardButton.Yes:
+                sd_path = self.parent.sd_combo.currentData()
+                if not sd_path:
+                    QMessageBox.information(self, "提示", "请先选择主机内存卡。")
+                    return
+                nint_path = Path(sd_path) / 'Nintendo 3DS'
+                _id0_path = nint_path / self.parent.crypto.id0.hex()
+
+                if not _id0_path.is_dir():
+                    QMessageBox.critical(self, "提示",
+                                         f"未找到 id0 文件夹：{_id0_path}，请确保你选择了正确的内存卡并且已开机过一次。")
+                    return
+
+                _list_dir = os.listdir(_id0_path)
+
+                _pending_fix_list = [p for p in _list_dir if p.startswith('tupending_')]
+
+                _id1_list = []
+                for _id1 in _list_dir:
+                    if not _id1.startswith('tupending_'):
+                        try:
+                            bytes.fromhex(_id1)
+                            _id1_list.append(_id1)
+                        except ValueError:
+                            continue
+
+                if _pending_fix_list:
+                    if len(_id1_list) > 1:
+                        QMessageBox.critical(self, "？？？",
+                                             "检测到修复过程中增加了多个 id1 文件夹，修复无法继续！将尝试还原状态。")
+                        for _id1 in _id1_list:
+                            id1_path = _id0_path / _id1
+                            shutil.rmtree(id1_path)
+                        for p in _list_dir:
+                            if p.startswith('tupending_'):
+                                pending_path = _id0_path / p
+                                pending_path.rename(_id0_path / p[len('tupending_'):])
+                        return
+                    elif len(_id1_list) == 1:
+                        if (t := 'tupending_' + _id1_list[0]) in _list_dir:
+                            shutil.rmtree(_id0_path / _id1_list[0])
+                            pending_path = _id0_path / t
+                            pending_path.rename(_id0_path / _id1_list[0])
+                            _pending_fix_list.remove(t)
+                            for p in _pending_fix_list:
+                                shutil.rmtree(_id0_path / p)
+
+                            QMessageBox.information(self, "成功", "修复完成！")
+                        else:
+                            QMessageBox.critical(self, "？？？", "未找到待修复的 id1 文件夹，修复无法继续！")
+                    else:
+                        QMessageBox.warning(self, "警告",
+                                            "未找到任何新生成的 id1 文件夹，请将内存卡插入主机开机一次以生成文件夹再重试。")
+                else:
+                    if len(_id1_list) > 1:
+                        for _id1 in _id1_list:
+                            _id1_path = _id0_path / _id1
+                            pending_path = _id0_path / ('tupending_' + _id1)
+                            if os.path.exists(_id1_path):
+                                _id1_path.rename(pending_path)
+                        QMessageBox.information(self, "提示",
+                                                "已准备好修复。请将内存卡插入主机开机一次，然后再回来点击修复按钮。")
+                    else:
+                        QMessageBox.information(self, "提示", "未找到符合条件的文件夹，无需修复。")
+
+        fix_id1_button = QPushButton("修复安装文件夹冲突")
+        self.layout.addWidget(fix_id1_button)
+        fix_id1_button.clicked.connect(fix_multiple_id1_error)
+
         # Add close button
         close_button = QPushButton("关闭")
         self.layout.addWidget(close_button)
@@ -714,7 +796,7 @@ class CompressedFileProcessor(QObject):
         if sys.platform == 'win32':
             self.sevenzip_path = join(dirname(abspath(__file__)), 'bin', sys.platform, '7za.exe')
         else:
-            self.sevenzip_path = join(dirname(abspath(__file__)), sys.platform, '7zz')
+            self.sevenzip_path = join(dirname(abspath(__file__)), 'bin', sys.platform, '7zz')
         self.process = None
         self.output_buffer = []
         self.current_operation = None
@@ -1106,6 +1188,7 @@ class Tulip3DSGUI(QMainWindow):
         self.log_window = QTextEdit()
         self.log_window.setReadOnly(True)
         self.log_window.setMinimumHeight(100)
+        self.log_window.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.log_window.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # Enable word wrap to prevent horizontal expansion
         self.splitter.addWidget(self.log_window)
 
@@ -1945,19 +2028,7 @@ class Tulip3DSGUI(QMainWindow):
             for card in cards:
                 self.add_game_card_image(card)
 
-    def check_b9_loaded(self):
-        self.b9_loaded = False
-        try:
-            crypto = CryptoEngine(boot9=b9_paths[0])
-            self.b9_loaded = crypto.b9_keys_set
-        except MissingSeedError:
-            pass
-        except BootromNotFoundError:
-            self.log('未找到 boot9.bin 文件，请指定一个文件。')
-        except Exception as e:
-            self.log(f'无法加载 boot9 文件：{e}')
-        return self.b9_loaded
-
+    crypto = CryptoEngine(boot9=b9_paths[0])
 
     def switch_button_states(self, enabled: bool):
         self.add_cia_button.setEnabled(enabled)
@@ -1995,18 +2066,25 @@ class Tulip3DSGUI(QMainWindow):
         self.info_label.setText(info_text)
 
     def _update_button_states(self):
-        self.enabled_button = all([
-                       bool(self.sd_combo.currentData()),
-                       bool(self.movable_combo.currentData()),
-                       ])
+        try:
+            self.enabled_button = all([
+                           bool(self.sd_combo.currentData()),
+                           bool(self.movable_combo.currentData()),
+                           ])
 
-        self.switch_button_states(self.enabled_button)
-        self.update_info_label()
+            self.switch_button_states(self.enabled_button)
+            self.update_info_label()
 
-        if self.enabled_button:
-            self.status_label.setText('就绪，可拖拽文件或文件夹至窗口添加应用（*.cia / *.3ds / *.cci）')
-        else:
-            self.status_label.setText('请选择 SD 卡根目录及 movable.sed。')
+            if self.enabled_button:
+                if self.crypto is not None and ((m := self.get_selected_movable_path()) is not None):
+                    self.crypto.setup_sd_key_from_file(m)
+                self.status_label.setText('就绪，可拖拽文件或文件夹至窗口添加应用（*.cia / *.3ds / *.cci）')
+            else:
+                self.status_label.setText('请选择 SD 卡根目录及 movable.sed。')
+        except Exception as e:
+            traceback.print_exc()
+            self.log("发生错误：" + str(e))
+            self.enabled_button = False
         return self.enabled_button
 
 
@@ -2154,7 +2232,7 @@ class Tulip3DSGUI(QMainWindow):
         if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        src = Path(file_parent) / 'Tulip3DS-Client.cia'
+        src = Path(file_parent) / 'bin' / 'common' / 'Tulip3DS-Client.cia'
         dst = Path(self.sd_combo.currentData()) / 'Tulip3DS-Client.cia'
         try:
             shutil.copy(src, dst)
@@ -2233,6 +2311,7 @@ class Tulip3DSGUI(QMainWindow):
         except Exception as e:
             self.log(f"清理安装状态时发生错误：{str(e)}")
 
+
     def start_install(self):
         if not self.readers:
             self.signals.log_signal.emit("你还没有添加任何应用，请先添加一个再进行安装。")
@@ -2270,7 +2349,8 @@ class Tulip3DSGUI(QMainWindow):
                 sd=sd_path,
                 skip_contents=self.skip_contents.isChecked(),
                 overwrite_saves=self.overwrite_saves.isChecked(),
-                force_install=self.force_install
+                force_install=self.force_install,
+                crypto=self.crypto
             )
 
             # Set up event handlers
@@ -2329,7 +2409,7 @@ class Tulip3DSGUI(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    icon = QIcon(file_parent + '/bin/logo_small.png')
+    icon = QIcon(file_parent + '/bin/common/logo_small.png')
     app.setWindowIcon(icon)
     window = Tulip3DSGUI()
     window.show()

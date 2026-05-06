@@ -204,12 +204,15 @@ def get_install_size(title: 'Union[CIAReader, CDNReader]'):
 class CustomInstall:
     def __init__(self, *, movable, sd, tufinish_out=None, overwrite_saves=False, skip_contents=False,
                  force_install=False,
-                 boot9=None, seeddb=None):
+                 boot9=None, seeddb=None, crypto: CryptoEngine=None):
         self.event = Events()
         self.log_lines = []  # Stores all info messages for user to view
 
-        self.crypto = CryptoEngine(boot9=boot9)
-        self.crypto.setup_sd_key_from_file(movable)
+        if crypto is not None:
+            self.crypto = crypto
+        else:
+            self.crypto = CryptoEngine(boot9=boot9)
+            self.crypto.setup_sd_key_from_file(movable)
         self.seeddb = seeddb
         self.readers: 'List[Tuple[Union[CDNReader, CIAReader], Union[PathLike, bytes, str]]]' = []
         self.sd = sd
@@ -290,8 +293,8 @@ class CustomInstall:
         self.log("寻找需要安装到的路径中...")
         [sd_path, id1s] = self.get_sd_path()
         if len(id1s) > 1:
-            raise SDPathError(f'ID0 文件夹 {crypto.id0.hex()} 下有多个 ID1 文件夹，'
-                              f'请移除多余的 ID1 文件夹，一般是最小的文件夹。')
+            raise SDPathError(f'ID0 文件夹 {crypto.id0.hex()} 下有多个 ID1 文件夹，\n'
+                              f'请打开 “关于” 菜单，执行 “修复安装文件夹冲突” 工具。')
         elif len(id1s) == 0:
             raise SDPathError(f'无法在 ID0 {crypto.id0.hex()} 文件夹下找到适合的 ID1 文件夹。')
         id1 = id1s[0]
@@ -317,7 +320,7 @@ class CustomInstall:
         importdb_path = join(db_path, 'import.db')
         if not isfile(titledb_path):
             makedirs(db_path, exist_ok=True)
-            with gzip.open(script_path / 'bin' / 'title.db.gz') as f:
+            with gzip.open(script_path / 'bin' / 'common' / 'title.db.gz') as f:
                 tdb = f.read()
 
             self.log(f'创建 title.db 中...')
@@ -678,7 +681,7 @@ class CustomInstall:
                     self.log(f'检测到已安装了 {application_count} 个应用。', 1)
                     self.log('主菜单仅会显示 300 个应用。', 1)
                     self.log('需要删除某些应用（应用更新和 DLC 除外）才能使安装的应用显示。', 1)
-                finalize_3dsx_orig_path = script_path / 'bin' / 'Tulip3DS-Client.cia'
+                finalize_3dsx_orig_path = script_path / 'bin' / 'common' / 'Tulip3DS-Client.cia'
                 self.log(str(finalize_3dsx_orig_path))
 
                 finalize_3dsx_path = Path(self.sd) / 'Tulip3DS-Client.cia'

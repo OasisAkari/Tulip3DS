@@ -2011,9 +2011,8 @@ class Tulip3DSGUI(QMainWindow):
         cards = []
         for p in filePath:
             p = p.replace('file:///', '', 1).strip()
-            if sys.platform == 'darwin':
+            if p and sys.platform == 'darwin':
                 p = '/' + p
-            self.log(str(os.path.exists(p)))
             if p and isfile(p):
                 if p.lower().endswith('.cia'):
                     cias.append(p)

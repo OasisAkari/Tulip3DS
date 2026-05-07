@@ -38,5 +38,5 @@ ci_qt.exe
 7za.exe
 Tulip3DS.exe
 nuitka-crash-report.xml
-
+Tulip3DS-*
 test*

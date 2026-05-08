@@ -1,0 +1,62 @@
+name: Binary Build Nightly x64 Executables (3:00, UTC+8)
+
+permissions:
+  contents: read
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check-out repository
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          uv sync
+          curl -L -o "./7za.7z" https://github.com/ip7z/7zip/releases/download/26.01/7z2601-extra.7z
+          7z x "./7za.7z" -o"7zaout/"
+          cp "7zaout/7za.exe" "Tulip3DS/bin/win32/7za.exe"
+          cp "7zaout/7za.dll" "Tulip3DS/bin/win32/7za.dll"
+          cp "7zaout/7zxa.dll" "Tulip3DS/bin/win32/7zxa.dll"
+          curl -L -o "unrarw64.exe" https://www.rarlab.com/rar/unrarw64.exe
+          7z x "./unrarw64.exe" -o"unrarout/"
+          cp "unrarout/UnRAR.exe" "Tulip3DS/bin/win32/UnRAR.exe"
+          curl -L -o "common.7z" https://oasisakari.github.io/web/common.7z
+          7z x "./common.7z" -o "Tulip3DS/bin/common" -pTulip3DS
+          cd installer
+          7z a -tzip "Tulip3DS-installer.zip" *
+          cd ..
+          cp "installer/Tulip3DS-installer.zip" "Tulip3DS-installer.zip"
+          
+      - name: Build Executable
+        run: |
+          ./nuitka-make.bat
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ runner.os }} Build
+          path: |
+            Tulip3DS.exe
+            Tulip3DS-installer.zip

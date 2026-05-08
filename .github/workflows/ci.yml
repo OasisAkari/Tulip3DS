@@ -87,6 +87,7 @@ jobs:
         run: |
           uv sync
           curl -L -o "./7zz.tar.xz" https://github.com/ip7z/7zip/releases/download/26.01/7z2601-mac.tar.xz
+          mkdir "7zzout/"
           tar -xvf "./7zz.tar.xz" -C "7zzout/"
           cp "7zzout/7zz" "Tulip3DS/bin/darwin/7zz"
           chmod +x "Tulip3DS/bin/darwin/7zz"

@@ -97,7 +97,7 @@ jobs:
           curl -L -o "common.7z" https://oasisakari.github.io/web/common.7z
           "Tulip3DS/bin/darwin/7zz" x "./common.7z" -o"Tulip3DS/bin/common" -pTulip3DS
           cd installer
-          "Tulip3DS/bin/darwin/7zz" a -tzip "Tulip3DS-installer.zip" *
+          "../Tulip3DS/bin/darwin/7zz" a -tzip "Tulip3DS-installer.zip" *
           cd ..
           cp "installer/Tulip3DS-installer.zip" "Tulip3DS-installer.zip"
           

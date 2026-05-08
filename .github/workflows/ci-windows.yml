@@ -1,4 +1,4 @@
-name: Windows Build
+name: CI
 
 permissions:
   contents: read
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     strategy:
       fail-fast: false
       matrix:
@@ -59,4 +59,57 @@ jobs:
           name: ${{ runner.os }} Build
           path: |
             Tulip3DS.exe
+            Tulip3DS-installer.zip
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check-out repository
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          uv sync
+          curl -L -o "./7zz.tar.xz" https://github.com/ip7z/7zip/releases/download/26.01/7z2601-mac.tar.xz
+          tar -xvf "./7zz.tar.xz" -C "7zzout/"
+          cp "7zzout/7zz" "Tulip3DS/bin/darwin/7zz"
+          chmod +x "Tulip3DS/bin/darwin/7zz"
+          curl -L -o "unrar.gz" https://www.rarlab.com/rar/unrar_MacOSX_10.13.2_64bit.gz
+          gzip -d "unrar.gz"
+          cp "unrar_*" "Tulip3DS/bin/darwin/unrar"
+          chmod +x "Tulip3DS/bin/darwin/unrar"
+          curl -L -o "common.7z" https://oasisakari.github.io/web/common.7z
+          "Tulip3DS/bin/darwin/7zz" x "./common.7z" -o"Tulip3DS/bin/common" -pTulip3DS
+          cd installer
+          "Tulip3DS/bin/darwin/7zz" a -tzip "Tulip3DS-installer.zip" *
+          cd ..
+          cp "installer/Tulip3DS-installer.zip" "Tulip3DS-installer.zip"
+          
+      - name: Build Executable
+        run: |
+          uv run ./nuitka-make-macos
+          "Tulip3DS/bin/darwin/7zz" a -tzip "Tulip3DS.zip" "Tulip3DS.app"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ runner.os }} Build
+          path: |
+            Tulip3DS.zip
             Tulip3DS-installer.zip

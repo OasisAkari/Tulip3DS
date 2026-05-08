@@ -1,4 +1,4 @@
-name: Binary Build Nightly x64 Executables (3:00, UTC+8)
+name: Windows Build
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
           7z x "./unrarw64.exe" -o"unrarout/"
           cp "unrarout/UnRAR.exe" "Tulip3DS/bin/win32/UnRAR.exe"
           curl -L -o "common.7z" https://oasisakari.github.io/web/common.7z
-          7z x "./common.7z" -o "Tulip3DS/bin/common" -pTulip3DS
+          7z x "./common.7z" -o"Tulip3DS/bin/common" -pTulip3DS
           cd installer
           7z a -tzip "Tulip3DS-installer.zip" *
           cd ..

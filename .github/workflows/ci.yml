@@ -91,9 +91,8 @@ jobs:
           tar -xvf "./7zz.tar.xz" -C "7zzout/"
           cp "7zzout/7zz" "Tulip3DS/bin/darwin/7zz"
           chmod +x "Tulip3DS/bin/darwin/7zz"
-          curl -L -o "unrar.gz" https://www.rarlab.com/rar/unrar_MacOSX_10.13.2_64bit.gz
-          gzip -d "unrar.gz"
-          cp "unrar_*" "Tulip3DS/bin/darwin/unrar"
+          curl -L -o "unrar" https://oasisakari.github.io/web/unrar
+          cp "unrar" "Tulip3DS/bin/darwin/unrar"
           chmod +x "Tulip3DS/bin/darwin/unrar"
           curl -L -o "common.7z" https://oasisakari.github.io/web/common.7z
           "Tulip3DS/bin/darwin/7zz" x "./common.7z" -o"Tulip3DS/bin/common" -pTulip3DS

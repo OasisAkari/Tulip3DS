@@ -74,7 +74,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: "3.9"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -86,6 +86,7 @@ jobs:
         shell: bash
         run: |
           uv sync
+          uv add --reinstall "Nuitka[all] @ git+https://github.com/Nuitka/Nuitka.git@factory"
           curl -L -o "./7zz.tar.xz" https://github.com/ip7z/7zip/releases/download/26.01/7z2601-mac.tar.xz
           mkdir "7zzout/"
           tar -xvf "./7zz.tar.xz" -C "7zzout/"

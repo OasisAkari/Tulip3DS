@@ -12,4 +12,5 @@ dependencies = [
     "pillow>=11.3.0",
     "nuitka[onefile]>=4.0.8",
     "imageio>=2.37.2",
+    "orjson>=3.11.5",
 ]

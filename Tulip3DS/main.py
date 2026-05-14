@@ -5,6 +5,7 @@ import re
 import shutil
 import sys
 import traceback
+import urllib.parse
 from datetime import datetime
 from io import BytesIO
 from os.path import abspath, basename, dirname, join, isfile, isdir
@@ -2013,6 +2014,8 @@ class Tulip3DSGUI(QMainWindow):
             p = p.replace('file:///', '', 1).strip()
             if p and sys.platform == 'darwin':
                 p = '/' + p
+            if p:
+                p = urllib.parse.unquote(p)
             if p and isfile(p):
                 if p.lower().endswith('.cia'):
                     cias.append(p)

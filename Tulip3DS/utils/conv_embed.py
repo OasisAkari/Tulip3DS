@@ -232,7 +232,7 @@ def conventer(log=print, verbose=False, dev_keys=None, use_deprecated=False, gam
 
     files = []
     for arg in game:
-        to_add = glob.glob(arg)
+        to_add = glob.glob(glob.escape(arg))
         if len(to_add) == 0:
             error('"{}" doesn\'t exist.'.format(arg))
             total_files += 1

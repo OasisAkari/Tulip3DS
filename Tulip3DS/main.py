@@ -17,13 +17,49 @@ from typing import Tuple, List, Dict
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from PySide6.QtCore import Qt, Signal as pyqtSignal, QObject, QSize, QUrl, QProcess, QTimer
-from PySide6.QtGui import QPixmap, QIcon, QDragEnterEvent, QDesktopServices, QPainter, QColor, QPen
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QPushButton, QFileDialog, QTreeWidget,
-                               QTreeWidgetItem, QProgressBar, QCheckBox, QMessageBox,
-                               QTextEdit, QTextBrowser, QSplitter, QDialog, QAbstractItemView, QSystemTrayIcon,
-                               QHeaderView, QComboBox, QSizePolicy)
+from PySide6.QtCore import (
+    Qt,
+    Signal as pyqtSignal,
+    QObject,
+    QSize,
+    QUrl,
+    QProcess,
+    QTimer,
+)
+from PySide6.QtGui import (
+    QPixmap,
+    QIcon,
+    QDragEnterEvent,
+    QDesktopServices,
+    QPainter,
+    QColor,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QFileDialog,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QProgressBar,
+    QCheckBox,
+    QMessageBox,
+    QTextEdit,
+    QTextBrowser,
+    QSplitter,
+    QDialog,
+    QAbstractItemView,
+    QSystemTrayIcon,
+    QHeaderView,
+    QComboBox,
+    QSizePolicy,
+)
 from pyctr.crypto import CryptoEngine, load_seeddb
 from pyctr.crypto.engine import b9_paths
 from pyctr.type.cdn import CDNError, CDNReader
@@ -31,22 +67,28 @@ from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
 
 from utils.conv_embed import conventer
-from utils.custominstall import CustomInstall, load_tufinish, InvalidTUFinishError, InstallStatus, is_windows, \
-    get_install_size
+from utils.custominstall import (
+    CustomInstall,
+    load_tufinish,
+    InvalidTUFinishError,
+    InstallStatus,
+    is_windows,
+    get_install_size,
+)
 
 # from winmica import is_mica_supported, ApplyMica, MicaType
 
 file_parent = dirname(abspath(__file__))
 current_path = Path(file_parent)
 
-TU_VERSION = '1.6'
+TU_VERSION = "1.7"
 
 
 # automatically load boot9 if it's in the current directory
-b9_paths.insert(0, str(current_path / 'bin' / 'common' / 'boot9.bin'))
+b9_paths.insert(0, str(current_path / "bin" / "common" / "boot9.bin"))
 
 seeddb_paths = []
-seeddb_paths.insert(0, str(current_path / 'bin' / 'common' / 'seeddb.bin'))
+seeddb_paths.insert(0, str(current_path / "bin" / "common" / "seeddb.bin"))
 
 
 taskbar = None
@@ -54,84 +96,91 @@ if is_windows:
     try:
         import comtypes.client as cc
 
-        tbl = cc.GetModule(file_parent + '/bin/win32/TaskbarLib.tlb')
+        tbl = cc.GetModule(file_parent + "/bin/win32/TaskbarLib.tlb")
 
-        taskbar = cc.CreateObject('{56FDF344-FD6D-11D0-958A-006097C9A090}', interface=tbl.ITaskbarList3)
+        taskbar = cc.CreateObject(
+            "{56FDF344-FD6D-11D0-958A-006097C9A090}", interface=tbl.ITaskbarList3
+        )
         taskbar.HrInit()
     except (ModuleNotFoundError, UnicodeEncodeError, AttributeError):
         traceback.print_exc()
         pass
 
+
 def find_first_file(paths):
     for p in paths:
         if isfile(p):
-            return p.replace('\\', '/')
+            return p.replace("\\", "/")
 
 
 timer: Dict[str, Timer] = {}
 
+
 def debounce(func, delay):
     def wrapper(*args, **kwargs):
-        if (t:=timer.get(func.__name__, None)) is not None:
+        if (t := timer.get(func.__name__, None)) is not None:
             t.cancel()
             del timer[func.__name__]
         # 设置新的计时器
         timer[func.__name__] = Timer(delay, func, args=args, kwargs=kwargs)
         timer[func.__name__].start()
+
     return wrapper
 
 
 # find boot9, seeddb, and movable.sed to auto-select in the gui
 default_b9_path = find_first_file(b9_paths)
 default_seeddb_path = find_first_file(seeddb_paths)
-default_movable_sed_path = find_first_file([join(file_parent, 'movable.sed')])
+default_movable_sed_path = find_first_file([join(file_parent, "movable.sed")])
 
 if default_seeddb_path:
     load_seeddb(default_seeddb_path)
 
 statuses = {
-    InstallStatus.Waiting: '等待中',
-    InstallStatus.Starting: '安装中',
-    InstallStatus.Writing: '写入中',
-    InstallStatus.Finishing: '完成中',
-    InstallStatus.Done: '完成',
-    InstallStatus.Failed: '失败',
+    InstallStatus.Waiting: "等待中",
+    InstallStatus.Starting: "安装中",
+    InstallStatus.Writing: "写入中",
+    InstallStatus.Finishing: "完成中",
+    InstallStatus.Done: "完成",
+    InstallStatus.Failed: "失败",
 }
 
 
 def format_file_size(size: int) -> str:
     if size < 1024:
-        return f'{size} B'
+        return f"{size} B"
 
-    units = ['KiB', 'MiB', 'GiB', 'TiB']
+    units = ["KiB", "MiB", "GiB", "TiB"]
     value = float(size)
     for unit in units:
         value /= 1024
         if value < 1024 or unit == units[-1]:
-            return f'{value:.1f} {unit}'
+            return f"{value:.1f} {unit}"
 
-    return f'{size} B'
+    return f"{size} B"
 
 
 def get_disk_info(path: str, log=print) -> Tuple[str, str]:
     try:
         if not path or not isdir(path):
-            return '', ''
+            return "", ""
         usage = shutil.disk_usage(path)
         return format_file_size(usage.total), format_file_size(usage.free)
     except Exception as e:
-        log(f'获取磁盘信息失败: {e}')
-        return '', ''
+        log(f"获取磁盘信息失败: {e}")
+        return "", ""
 
 
 class ConvertDialog(QDialog):
     """Dialog for converting 3DS/CCI files to CIA format"""
+
     # Signals to safely communicate between conversion thread and GUI thread
     convert_progress_signal = pyqtSignal(float, int, int, int, int)
     status_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str, str)
     info_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal()
+
     def __init__(self, parent, log_func=print):
         super().__init__(parent)
         self.setWindowTitle("转换 3DS/CCI 文件为 CIA")
@@ -156,10 +205,7 @@ class ConvertDialog(QDialog):
         self.drop_area = QLabel("拖拽文件到此处转换为 CIA")
         self.drop_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_area.setStyleSheet(
-            "border: 2px dashed #ccc; "
-            "border-radius: 5px; "
-            "padding: 50px; "
-            "color: #666;"
+            "border: 2px dashed #ccc; border-radius: 5px; padding: 50px; color: #666;"
         )
         self.drop_area.setMinimumHeight(200)
         layout.addWidget(self.drop_area)
@@ -191,10 +237,7 @@ class ConvertDialog(QDialog):
         """Open file dialog to select 3DS/CCI files"""
         file_filter = "游戏卡镜像 (*.3ds *.cci);;所有文件 (*)"
         file_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "选择 3DS/CCI 文件",
-            "",
-            file_filter
+            self, "选择 3DS/CCI 文件", "", file_filter
         )
         if file_paths:
             self.files_to_convert = file_paths
@@ -217,26 +260,20 @@ class ConvertDialog(QDialog):
     def dragLeaveEvent(self, e):
         """Handle drag leave event"""
         self.drop_area.setStyleSheet(
-            "border: 2px dashed #ccc; "
-            "border-radius: 5px; "
-            "padding: 50px; "
-            "color: #666;"
+            "border: 2px dashed #ccc; border-radius: 5px; padding: 50px; color: #666;"
         )
 
     def dropEvent(self, e):
         """Handle drop event"""
         self.drop_area.setStyleSheet(
-            "border: 2px dashed #ccc; "
-            "border-radius: 5px; "
-            "padding: 50px; "
-            "color: #666;"
+            "border: 2px dashed #ccc; border-radius: 5px; padding: 50px; color: #666;"
         )
 
         urls = e.mimeData().urls()
         new_files = []
         for url in urls:
             path = url.toLocalFile()
-            if isfile(path) and path.lower().endswith(('.3ds', '.cci')):
+            if isfile(path) and path.lower().endswith((".3ds", ".cci")):
                 new_files.append(path)
 
         if new_files:
@@ -255,11 +292,11 @@ class ConvertDialog(QDialog):
         for file_path in list(self.files_to_convert):
             output_dir = dirname(file_path)
             if not output_dir or not isdir(output_dir):
-                self.log(f'跳过无法访问的输出目录：{output_dir}')
+                self.log(f"跳过无法访问的输出目录：{output_dir}")
                 skipped_files += 1
                 continue
 
-            cia_name = join(output_dir, Path(file_path).stem + '.cia')
+            cia_name = join(output_dir, Path(file_path).stem + ".cia")
             overwrite = False
 
             if isfile(cia_name):
@@ -267,10 +304,10 @@ class ConvertDialog(QDialog):
                     self,
                     "确认覆盖",
                     f"目标目录中已存在同名 CIA 文件：\n{cia_name}\n\n是否覆盖？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 )
                 if confirm != QMessageBox.StandardButton.Yes:
-                    self.log(f'已跳过同名 CIA：{cia_name}')
+                    self.log(f"已跳过同名 CIA：{cia_name}")
                     skipped_files += 1
                     continue
                 overwrite = True
@@ -279,7 +316,7 @@ class ConvertDialog(QDialog):
                 required_size = os.path.getsize(file_path)
                 free_space = shutil.disk_usage(output_dir).free
             except Exception as e:
-                self.log(f'检查空间失败，跳过 {basename(file_path)}：{e}')
+                self.log(f"检查空间失败，跳过 {basename(file_path)}：{e}")
                 skipped_files += 1
                 continue
 
@@ -289,9 +326,9 @@ class ConvertDialog(QDialog):
                     "空间不足",
                     f"目标目录空间不足，已拒绝转换：\n{file_path}\n\n"
                     f"所需空间: {format_file_size(required_size)}\n"
-                    f"可用空间: {format_file_size(free_space)}"
+                    f"可用空间: {format_file_size(free_space)}",
                 )
-                self.log(f'空间不足，已拒绝转换：{file_path}')
+                self.log(f"空间不足，已拒绝转换：{file_path}")
                 skipped_files += 1
                 continue
 
@@ -327,8 +364,12 @@ class ConvertDialog(QDialog):
                     output_dir = dirname(file_path)
 
                     # Inform main thread about status
-                    self.log(f'正在转换文件 ({idx}/{total_files}): {basename(file_path)}')
-                    self.status_signal.emit(f"正在转换: {basename(file_path)} ({idx}/{total_files})")
+                    self.log(
+                        f"正在转换文件 ({idx}/{total_files}): {basename(file_path)}"
+                    )
+                    self.status_signal.emit(
+                        f"正在转换: {basename(file_path)} ({idx}/{total_files})"
+                    )
 
                     # Call converter function
                     conventer(
@@ -339,15 +380,21 @@ class ConvertDialog(QDialog):
                         overwrite=overwrite,
                         boot9=b9_paths[0],
                         ignore_bad_hashes=False,
-                        on_progress=lambda percent, read, size: self.convert_progress_signal.emit(percent, read, size, idx, total_files)
+                        on_progress=lambda percent, read, size: (
+                            self.convert_progress_signal.emit(
+                                percent, read, size, idx, total_files
+                            )
+                        ),
                     )
 
-                    self.log(f'转换完成: {basename(file_path)}')
+                    self.log(f"转换完成: {basename(file_path)}")
 
                 except Exception as e:
-                    self.log(f'转换失败 {basename(file_path)}: {e}')
+                    self.log(f"转换失败 {basename(file_path)}: {e}")
                     # Show error in main thread
-                    self.error_signal.emit("转换错误", f"转换 {basename(file_path)} 时出错:\n{str(e)}")
+                    self.error_signal.emit(
+                        "转换错误", f"转换 {basename(file_path)} 时出错:\n{str(e)}"
+                    )
 
             # Notify main thread that conversion finished
             self.info_signal.emit("完成", "已转换完成，请检查目录")
@@ -428,7 +475,9 @@ class BadgeButton(QPushButton):
         margin = 6
         x = max(margin, self.width() - diameter - margin)
         y = margin
-        rect = self.rect().adjusted(x, y, -(self.width() - x - diameter), -(self.height() - y - diameter))
+        rect = self.rect().adjusted(
+            x, y, -(self.width() - x - diameter), -(self.height() - y - diameter)
+        )
         painter.setPen(QPen(QColor("white"), 1))
         painter.setBrush(QColor("#e53935"))
         painter.drawEllipse(rect)
@@ -462,7 +511,7 @@ class ThanksDialog(QDialog):
 
 
 class AboutDialog(QDialog):
-    def __init__(self, parent: 'Tulip3DSGUI'):
+    def __init__(self, parent: "Tulip3DSGUI"):
         super().__init__(parent)
         self.parent = parent
         self.setWindowTitle("关于 Tulip3DS")
@@ -485,27 +534,29 @@ class AboutDialog(QDialog):
         about_label.setOpenExternalLinks(True)
         self.layout.addWidget(about_label)
 
-
         # Add force install checkbox
         self.force_install_checkbox = QCheckBox("强制安装（跳过哈希检查）")
-        self.force_install_checkbox.setToolTip("如果你知道自己在做什么，可以启用此选项。")
+        self.force_install_checkbox.setToolTip(
+            "如果你知道自己在做什么，可以启用此选项。"
+        )
         self.layout.addWidget(self.force_install_checkbox)
 
         # Add a note about the force install checkbox
 
         def force_install_changed_warning():
             if self.force_install_checkbox.isChecked():
-                w = QMessageBox.critical(self, "警告",
-                                    "启用强制安装将会尝试安装损坏的应用，安装后的应用很有可能会中途崩溃或无法使用。\n"
-                                    "若你遇到了此类问题，首先应该做的是尝试重新下载资源，而不是启用此选项。\n"
-                                    "除非你知道你自己在做什么，否则请不要启用此选项！\n"
-                                    "本工具作者对安装损坏的应用产生的后果概不负责。",
-                                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-                                    )
+                w = QMessageBox.critical(
+                    self,
+                    "警告",
+                    "启用强制安装将会尝试安装损坏的应用，安装后的应用很有可能会中途崩溃或无法使用。\n"
+                    "若你遇到了此类问题，首先应该做的是尝试重新下载资源，而不是启用此选项。\n"
+                    "除非你知道你自己在做什么，否则请不要启用此选项！\n"
+                    "本工具作者对安装损坏的应用产生的后果概不负责。",
+                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                )
                 if w == QMessageBox.StandardButton.Cancel:
                     self.force_install_checkbox.setChecked(False)
             signals.force_install_signal.emit(self.force_install_checkbox.isChecked())
-
 
         self.force_install_checkbox.clicked.connect(force_install_changed_warning)
 
@@ -529,8 +580,10 @@ class AboutDialog(QDialog):
 
         def export_finalize():
             confirm = QMessageBox.question(
-                self, "导出 Tulip3DS Client", "你确定要导出 Tulip3DS Client 吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                self,
+                "导出 Tulip3DS Client",
+                "你确定要导出 Tulip3DS Client 吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if confirm == QMessageBox.StandardButton.Yes:
                 signals.export_finalize_signal.emit()
@@ -542,9 +595,11 @@ class AboutDialog(QDialog):
 
         def recover_pending_install():
             confirm = QMessageBox.question(
-                self, "恢复未完成的安装", "你确定要恢复未完成的安装吗？\n"
-                                          "这将会尝试从 SD 卡根目录的 tu-pending 文件夹中恢复上次未完成的安装。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                self,
+                "恢复未完成的安装",
+                "你确定要恢复未完成的安装吗？\n"
+                "这将会尝试从 SD 卡根目录的 tu-pending 文件夹中恢复上次未完成的安装。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if confirm == QMessageBox.StandardButton.Yes:
                 signals.recover_pending_install_signal.emit()
@@ -557,9 +612,11 @@ class AboutDialog(QDialog):
 
         def delete_corrupted_files():
             confirm = QMessageBox.question(
-                self, "删除损坏的文件", "你确定要删除损坏的文件吗？\n"
-                                        "这将会尝试从 SD 卡根目录的 tu-install-temp 为前缀的文件夹中删除所有损坏的文件。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                self,
+                "删除损坏的文件",
+                "你确定要删除损坏的文件吗？\n"
+                "这将会尝试从 SD 卡根目录的 tu-install-temp 为前缀的文件夹中删除所有损坏的文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if confirm == QMessageBox.StandardButton.Yes:
                 signals.delete_corrupted_files_signal.emit()
@@ -576,38 +633,45 @@ class AboutDialog(QDialog):
         convert_button.clicked.connect(open_convert_dialog)
 
         def fix_multiple_id1_error():
-            confirm1 = QMessageBox.question(self,
-                                            "提示",
-                                            "本功能可以帮助你修复 SD 卡中存在多个 id1 文件夹导致的安装问题。\n\n"
-                                            "为了防止丢失数据，请备份好内存卡的 Nintendo 3DS 文件夹后再继续。",
-                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            confirm1 = QMessageBox.question(
+                self,
+                "提示",
+                "本功能可以帮助你修复 SD 卡中存在多个 id1 文件夹导致的安装问题。\n\n"
+                "为了防止丢失数据，请备份好内存卡的 Nintendo 3DS 文件夹后再继续。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
             if confirm1 != QMessageBox.StandardButton.Yes:
                 return
-            confirm2 = QMessageBox.warning(self,
-                                           "提示",
-                                           "确认继续吗？\n\n"
-                                           "如果确认，主机的数据开机后将暂时不会显示，直到修复完成。",
-                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            confirm2 = QMessageBox.warning(
+                self,
+                "提示",
+                "确认继续吗？\n\n"
+                "如果确认，主机的数据开机后将暂时不会显示，直到修复完成。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
             if confirm2 == QMessageBox.StandardButton.Yes:
                 sd_path = self.parent.sd_combo.currentData()
                 if not sd_path:
                     QMessageBox.information(self, "提示", "请先选择主机内存卡。")
                     return
-                nint_path = Path(sd_path) / 'Nintendo 3DS'
+                nint_path = Path(sd_path) / "Nintendo 3DS"
                 _id0_path = nint_path / self.parent.crypto.id0.hex()
 
                 if not _id0_path.is_dir():
-                    QMessageBox.critical(self, "提示",
-                                         f"未找到 id0 文件夹：{_id0_path}，请确保你选择了正确的内存卡并且已开机过一次。")
+                    QMessageBox.critical(
+                        self,
+                        "提示",
+                        f"未找到 id0 文件夹：{_id0_path}，请确保你选择了正确的内存卡并且已开机过一次。",
+                    )
                     return
 
                 _list_dir = os.listdir(_id0_path)
 
-                _pending_fix_list = [p for p in _list_dir if p.startswith('tupending_')]
+                _pending_fix_list = [p for p in _list_dir if p.startswith("tupending_")]
 
                 _id1_list = []
                 for _id1 in _list_dir:
-                    if not _id1.startswith('tupending_'):
+                    if not _id1.startswith("tupending_"):
                         try:
                             bytes.fromhex(_id1)
                             _id1_list.append(_id1)
@@ -616,18 +680,21 @@ class AboutDialog(QDialog):
 
                 if _pending_fix_list:
                     if len(_id1_list) > 1:
-                        QMessageBox.critical(self, "？？？",
-                                             "检测到修复过程中增加了多个 id1 文件夹，修复无法继续！将尝试还原状态。")
+                        QMessageBox.critical(
+                            self,
+                            "？？？",
+                            "检测到修复过程中增加了多个 id1 文件夹，修复无法继续！将尝试还原状态。",
+                        )
                         for _id1 in _id1_list:
                             id1_path = _id0_path / _id1
                             shutil.rmtree(id1_path)
                         for p in _list_dir:
-                            if p.startswith('tupending_'):
+                            if p.startswith("tupending_"):
                                 pending_path = _id0_path / p
-                                pending_path.rename(_id0_path / p[len('tupending_'):])
+                                pending_path.rename(_id0_path / p[len("tupending_") :])
                         return
                     elif len(_id1_list) == 1:
-                        if (t := 'tupending_' + _id1_list[0]) in _list_dir:
+                        if (t := "tupending_" + _id1_list[0]) in _list_dir:
                             shutil.rmtree(_id0_path / _id1_list[0])
                             pending_path = _id0_path / t
                             pending_path.rename(_id0_path / _id1_list[0])
@@ -637,21 +704,33 @@ class AboutDialog(QDialog):
 
                             QMessageBox.information(self, "成功", "修复完成！")
                         else:
-                            QMessageBox.critical(self, "？？？", "未找到待修复的 id1 文件夹，修复无法继续！")
+                            QMessageBox.critical(
+                                self,
+                                "？？？",
+                                "未找到待修复的 id1 文件夹，修复无法继续！",
+                            )
                     else:
-                        QMessageBox.warning(self, "警告",
-                                            "未找到任何新生成的 id1 文件夹，请将内存卡插入主机开机一次以生成文件夹再重试。")
+                        QMessageBox.warning(
+                            self,
+                            "警告",
+                            "未找到任何新生成的 id1 文件夹，请将内存卡插入主机开机一次以生成文件夹再重试。",
+                        )
                 else:
                     if len(_id1_list) > 1:
                         for _id1 in _id1_list:
                             _id1_path = _id0_path / _id1
-                            pending_path = _id0_path / ('tupending_' + _id1)
+                            pending_path = _id0_path / ("tupending_" + _id1)
                             if os.path.exists(_id1_path):
                                 _id1_path.rename(pending_path)
-                        QMessageBox.information(self, "提示",
-                                                "已准备好修复。请将内存卡插入主机开机一次，然后再回来点击修复按钮。")
+                        QMessageBox.information(
+                            self,
+                            "提示",
+                            "已准备好修复。请将内存卡插入主机开机一次，然后再回来点击修复按钮。",
+                        )
                     else:
-                        QMessageBox.information(self, "提示", "未找到符合条件的文件夹，无需修复。")
+                        QMessageBox.information(
+                            self, "提示", "未找到符合条件的文件夹，无需修复。"
+                        )
 
         fix_id1_button = QPushButton("修复安装文件夹冲突")
         self.layout.addWidget(fix_id1_button)
@@ -750,6 +829,7 @@ class ScrollableErrorDialog(QDialog):
 
 class PasswordInputDialog(QDialog):
     """Dialog for inputting password for encrypted archives"""
+
     def __init__(self, parent, archive_name: str, wrong=False):
         super().__init__(parent)
         self.setWindowTitle("输入压缩包密码")
@@ -757,29 +837,31 @@ class PasswordInputDialog(QDialog):
         self.password = None
 
         layout = QVBoxLayout(self)
-        
+
         # Prompt label
-        prompt_label = QLabel(f"压缩包 '{archive_name}' 需要输入密码：" if not wrong else "密码错误：")
+        prompt_label = QLabel(
+            f"压缩包 '{archive_name}' 需要输入密码：" if not wrong else "密码错误："
+        )
         layout.addWidget(prompt_label)
-        
+
         # Password input field
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.returnPressed.connect(self.accept)
         layout.addWidget(self.password_input)
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         ok_button = QPushButton("确定")
         ok_button.clicked.connect(self.accept)
         cancel_button = QPushButton("取消")
         cancel_button.clicked.connect(self.reject)
-        
+
         button_layout.addStretch()
         button_layout.addWidget(ok_button)
         button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
-    
+
     def accept(self):
         self.password = self.password_input.text()
         super().accept()
@@ -787,17 +869,24 @@ class PasswordInputDialog(QDialog):
 
 class CompressedFileProcessor(QObject):
     """处理压缩文件扫描和提取的辅助类，使用QProcess实现非阻塞进程管理"""
-    scan_finished = pyqtSignal(bool, list, bool, object)  # success, files, need_password, result_data
+
+    scan_finished = pyqtSignal(
+        bool, list, bool, object
+    )  # success, files, need_password, result_data
     extract_finished = pyqtSignal(bool, str, object)  # success, temp_dir, result_data
     progress_updated = pyqtSignal(int, str)  # percentage, filename
     error_occurred = pyqtSignal(str)  # error message
-    
-    def __init__(self, parent: 'Tulip3DSGUI'):
+
+    def __init__(self, parent: "Tulip3DSGUI"):
         super().__init__()
-        if sys.platform == 'win32':
-            self.sevenzip_path = join(dirname(abspath(__file__)), 'bin', sys.platform, '7za.exe')
+        if sys.platform == "win32":
+            self.sevenzip_path = join(
+                dirname(abspath(__file__)), "bin", sys.platform, "7za.exe"
+            )
         else:
-            self.sevenzip_path = join(dirname(abspath(__file__)), 'bin', sys.platform, '7zz')
+            self.sevenzip_path = join(
+                dirname(abspath(__file__)), "bin", sys.platform, "7zz"
+            )
         self.process = None
         self.output_buffer = []
         self.current_operation = None
@@ -806,24 +895,28 @@ class CompressedFileProcessor(QObject):
         self._first_extract = True
 
         self.unrar_path = None
-        if sys.platform == 'win32':
-            self.unrar_path = join(dirname(abspath(__file__)), 'bin', sys.platform, 'UnRAR.exe')
+        if sys.platform == "win32":
+            self.unrar_path = join(
+                dirname(abspath(__file__)), "bin", sys.platform, "UnRAR.exe"
+            )
         else:
-            self.unrar_path = join(dirname(abspath(__file__)), 'bin', sys.platform, 'unrar')
-        self.current_program_type = '7z'
+            self.unrar_path = join(
+                dirname(abspath(__file__)), "bin", sys.platform, "unrar"
+            )
+        self.current_program_type = "7z"
         # partial output accumulator for streams that update via carriage returns
-        self._partial_output = ''
+        self._partial_output = ""
         # flag indicating rar archive has encrypted filenames (headers)
         self._filename_encrypted = False
-        
+
     def scan_archive(self, file_path, password=None):
         """使用QProcess扫描压缩文件"""
-        self.current_operation = 'scan'
-        self.operation_params = {'file_path': file_path, 'password': password}
+        self.current_operation = "scan"
+        self.operation_params = {"file_path": file_path, "password": password}
         self.output_buffer = []
         # prepare process and arguments; support .rar by using UnRAR
         # reset partial and encrypted flags
-        self._partial_output = ''
+        self._partial_output = ""
         self._filename_encrypted = False
 
         self.process = QProcess()
@@ -831,41 +924,45 @@ class CompressedFileProcessor(QObject):
         self.process.readyReadStandardError.connect(self._on_scan_error)
         self.process.finished.connect(self._on_scan_finished)
 
-        if file_path.lower().endswith('.rar'):
+        if file_path.lower().endswith(".rar"):
             # Use UnRAR to list filenames (lb = list bare filenames)
-            self.current_program_type = 'unrar'
+            self.current_program_type = "unrar"
             prog = self.unrar_path
-            args = [prog, 'lb', file_path]
+            args = [prog, "lb", file_path]
             # password handling for UnRAR: '-pPASSWORD' or '-p-' to disable
             if password:
                 # insert password option after the command (prog, 'lb', ...)
-                args.insert(2, f'-p{password}')
+                args.insert(2, f"-p{password}")
             else:
                 # do not prompt for password interactively; place after command
-                args.insert(2, '-p-')
+                args.insert(2, "-p-")
         else:
-            self.current_program_type = '7z'
+            self.current_program_type = "7z"
             prog = self.sevenzip_path
-            args = [prog, 'l', file_path, '-slt']
+            args = [prog, "l", file_path, "-slt"]
             if password:
-                args.append(f'-p{password}')
+                args.append(f"-p{password}")
             else:
-                args.append('-p')
+                args.append("-p")
 
         # log and start
         try:
-            self.parent.log("参数：" + ' '.join(args))
+            self.parent.log("参数：" + " ".join(args))
         except Exception:
             pass
         self.process.setProgram(prog)
         # omit program itself from arguments
         self.process.setArguments(args[1:])
         self.process.start()
-        
+
     def extract_archive(self, file_path, output_dir, password=None):
         """使用QProcess提取压缩文件"""
-        self.current_operation = 'extract'
-        self.operation_params = {'file_path': file_path, 'output_dir': output_dir, 'password': password}
+        self.current_operation = "extract"
+        self.operation_params = {
+            "file_path": file_path,
+            "output_dir": output_dir,
+            "password": password,
+        }
         self.output_buffer = []
         # prepare process and arguments; support .rar by using UnRAR
         self.process = QProcess()
@@ -873,56 +970,85 @@ class CompressedFileProcessor(QObject):
         self.process.readyReadStandardError.connect(self._on_extract_error)
         self.process.finished.connect(self._on_extract_finished)
 
-        if file_path.lower().endswith('.rar'):
-            self.current_program_type = 'unrar'
+        if file_path.lower().endswith(".rar"):
+            self.current_program_type = "unrar"
             prog = self.unrar_path
             # UnRAR extraction: x <archive> <output_dir> -y -pPASSWORD
-            args = [prog, 'x', file_path, output_dir, '-y']
+            args = [prog, "x", file_path, output_dir, "-y"]
             # UnRAR accepts -pPASSWORD (no space); insert after the command name
             if password:
-                args.insert(2, f'-p{password}')
+                args.insert(2, f"-p{password}")
             else:
-                args.insert(2, '-p-')
+                args.insert(2, "-p-")
         else:
-            self.current_program_type = '7z'
+            self.current_program_type = "7z"
             prog = self.sevenzip_path
-            args = [prog, 'x', file_path, f'-o{output_dir}', '-aoa', '-mmt', '-bsp1', '-y']
+            args = [
+                prog,
+                "x",
+                file_path,
+                f"-o{output_dir}",
+                "-aoa",
+                "-mmt",
+                "-bsp1",
+                "-y",
+            ]
             if password:
-                args.append(f'-p{password}')
+                args.append(f"-p{password}")
             else:
-                args.append('-p')
+                args.append("-p")
 
         try:
-            self.parent.log("参数：" + ' '.join(args))
+            self.parent.log("参数：" + " ".join(args))
         except Exception:
             pass
         self.process.setProgram(prog)
         self.process.setArguments(args[1:])
         self.process.start()
-        
+
     def _on_scan_output(self):
         """处理扫描操作的标准输出"""
         data = self.process.readAllStandardOutput()
-        text = bytes(data).decode('utf-8', errors='ignore')
+        text = bytes(data).decode("utf-8", errors="ignore")
         for line in self._consume_output(text):
             self.output_buffer.append(line)
             # for unrar listing, detect encrypted headers or password prompts in output lines
-            if self.current_program_type == 'unrar':
+            if self.current_program_type == "unrar":
                 ll = line.lower()
-                if any(k in ll for k in ('encrypted', 'headers are encrypted', 'file header encrypted', 'headers have been encrypted', 'enter password', 'password')):
+                if any(
+                    k in ll
+                    for k in (
+                        "encrypted",
+                        "headers are encrypted",
+                        "file header encrypted",
+                        "headers have been encrypted",
+                        "enter password",
+                        "password",
+                    )
+                ):
                     self._filename_encrypted = True
-    
+
     def _on_scan_error(self):
         """处理扫描操作的标准错误"""
         data = self.process.readAllStandardError()
-        text = bytes(data).decode('utf-8', errors='ignore')
+        text = bytes(data).decode("utf-8", errors="ignore")
         for line in self._consume_output(text):
             self.output_buffer.append(line)
-            if self.current_program_type == 'unrar':
+            if self.current_program_type == "unrar":
                 ll = line.lower()
-                if any(k in ll for k in ('encrypted', 'headers are encrypted', 'file header encrypted', 'headers have been encrypted', 'enter password', 'password')):
+                if any(
+                    k in ll
+                    for k in (
+                        "encrypted",
+                        "headers are encrypted",
+                        "file header encrypted",
+                        "headers have been encrypted",
+                        "enter password",
+                        "password",
+                    )
+                ):
                     self._filename_encrypted = True
-    
+
     def _on_scan_finished(self):
         """扫描操作完成"""
         return_code = self.process.exitCode()
@@ -930,15 +1056,15 @@ class CompressedFileProcessor(QObject):
         files = []
         need_password = False
 
-        if self.current_program_type == '7z':
+        if self.current_program_type == "7z":
             for line in self.output_buffer:
                 if line.startswith("Errors: "):
                     try:
-                        has_error = int(line[len("Errors: "):])
+                        has_error = int(line[len("Errors: ") :])
                     except Exception:
                         has_error = 1
                 if line.startswith("Path = "):
-                    files.append(line[len("Path = "):])
+                    files.append(line[len("Path = ") :])
                 if line.startswith("Encrypted = +"):
                     need_password = True
         else:
@@ -946,59 +1072,73 @@ class CompressedFileProcessor(QObject):
             for line in self.output_buffer:
                 # detect password-related stderr messages that may have been appended
                 l = line.lower()
-                if 'password' in l or 'encrypted' in l or 'enter password' in l:
+                if "password" in l or "encrypted" in l or "enter password" in l:
                     need_password = True
                 # treat any non-empty line as a filename candidate
-                if line and not any(h in line for h in ('rar', 'enter', 'password', 'error')):
+                if line and not any(
+                    h in line for h in ("rar", "enter", "password", "error")
+                ):
                     files.append(line)
 
         # include filename_encrypted flag in result_data for callers to know
-        result_info = {'has_error': has_error, 'return_code': return_code, 'filename_encrypted': self._filename_encrypted}
+        result_info = {
+            "has_error": has_error,
+            "return_code": return_code,
+            "filename_encrypted": self._filename_encrypted,
+        }
 
         success = return_code == 0 and has_error == 0
         # for UnRAR, if exit code non-zero but files found, still return success True to allow extraction attempt
-        if self.current_program_type == 'unrar' and files and return_code != 0:
+        if self.current_program_type == "unrar" and files and return_code != 0:
             # treat as listing success (UnRAR may return non-zero for encrypted archives)
             success = True
 
         self.scan_finished.emit(success, files, need_password, result_info)
-    
+
     def _on_extract_output(self):
         """处理提取操作的标准输出"""
         data = self.process.readAllStandardOutput()
-        text = bytes(data).decode('utf-8', errors='ignore')
+        text = bytes(data).decode("utf-8", errors="ignore")
         for line in self._consume_output(text):
             self.output_buffer.append(line)
             # 解析进度（7z 输出）或提取文件名（UnRAR 输出）
-            if self.current_program_type == '7z':
-                match = re.match(r'^(\d+)% - (.*)$', line)
+            if self.current_program_type == "7z":
+                match = re.match(r"^(\d+)% - (.*)$", line)
                 if match:
                     percentage = int(match.group(1))
                     filename = match.group(2)
                     self.progress_updated.emit(percentage, filename)
             else:
                 # UnRAR typically prints lines like "Extracting  filename" or uses carriage returns
-                m = re.search(r'Extracting\s+(.*)', line, flags=re.IGNORECASE)
+                m = re.search(r"Extracting\s+(.*)", line, flags=re.IGNORECASE)
                 if m:
                     filename = m.group(1).strip()
                     # emit -1 for unknown percentage; GUI will use filename text
                     self.progress_updated.emit(-1, filename)
-    
+
     def _on_extract_error(self):
         """处理提取操作的标准错误"""
         data = self.process.readAllStandardError()
-        text = bytes(data).decode('utf-8', errors='ignore')
+        text = bytes(data).decode("utf-8", errors="ignore")
         for line in self._consume_output(text):
             self.output_buffer.append(line)
             # detect password prompts or errors from UnRAR
-            if self.current_program_type == 'unrar':
+            if self.current_program_type == "unrar":
                 ll = line.lower()
-                if any(k in ll for k in ('password', 'enter password', 'encrypted', 'headers are encrypted')):
+                if any(
+                    k in ll
+                    for k in (
+                        "password",
+                        "enter password",
+                        "encrypted",
+                        "headers are encrypted",
+                    )
+                ):
                     # flag filename encryption/password needed
                     self._filename_encrypted = True
                     try:
                         # append an indicator compatible with 7z parsing
-                        self.output_buffer.append('Encrypted = +')
+                        self.output_buffer.append("Encrypted = +")
                     except Exception:
                         pass
 
@@ -1007,19 +1147,28 @@ class CompressedFileProcessor(QObject):
         self._flush_process_output()
 
         return_code = self.process.exitCode() if self.process else -1
-        temp_dir = self.operation_params.get('output_dir', '')
+        temp_dir = self.operation_params.get("output_dir", "")
         sub_item_error = 0
 
         for line in self.output_buffer:
-            if line.startswith('Sub items Errors: '):
+            if line.startswith("Sub items Errors: "):
                 try:
-                    sub_item_error = int(line[len('Sub items Errors: '):])
+                    sub_item_error = int(line[len("Sub items Errors: ") :])
                 except Exception:
                     sub_item_error = 1
 
-        if self.current_program_type == 'unrar' and return_code != 0:
-            lb = '\n'.join(self.output_buffer).lower()
-            if any(k in lb for k in ('password', 'enter password', 'encrypted', 'headers are encrypted', 'file header encrypted')):
+        if self.current_program_type == "unrar" and return_code != 0:
+            lb = "\n".join(self.output_buffer).lower()
+            if any(
+                k in lb
+                for k in (
+                    "password",
+                    "enter password",
+                    "encrypted",
+                    "headers are encrypted",
+                    "file header encrypted",
+                )
+            ):
                 sub_item_error = 1
 
         success = return_code == 0 and sub_item_error == 0
@@ -1029,11 +1178,15 @@ class CompressedFileProcessor(QObject):
             except Exception:
                 pass
 
-        self.extract_finished.emit(success, temp_dir, {
-            'sub_item_error': sub_item_error,
-            'return_code': return_code,
-            'filename_encrypted': self._filename_encrypted,
-        })
+        self.extract_finished.emit(
+            success,
+            temp_dir,
+            {
+                "sub_item_error": sub_item_error,
+                "return_code": return_code,
+                "filename_encrypted": self._filename_encrypted,
+            },
+        )
 
     def _consume_output(self, text: str):
         """Normalize and consume raw output text into complete lines.
@@ -1044,23 +1197,27 @@ class CompressedFileProcessor(QObject):
         """
         if not text:
             return []
-        s = text.replace('\r\n', '\n').replace('\r', '\n')
+        s = text.replace("\r\n", "\n").replace("\r", "\n")
         s = self._partial_output + s
-        parts = s.split('\n')
-        if text and not text.endswith('\n') and not text.endswith('\r'):
+        parts = s.split("\n")
+        if text and not text.endswith("\n") and not text.endswith("\r"):
             self._partial_output = parts.pop()
         else:
-            self._partial_output = ''
+            self._partial_output = ""
         lines = [p.strip() for p in parts if p.strip()]
         return lines
-    
+
     def _flush_process_output(self):
         """Consume any stdout/stderr that hasn't been delivered via readyRead signals yet."""
         if not self.process:
             return
         try:
-            out_text = bytes(self.process.readAllStandardOutput()).decode('utf-8', errors='ignore')
-            err_text = bytes(self.process.readAllStandardError()).decode('utf-8', errors='ignore')
+            out_text = bytes(self.process.readAllStandardOutput()).decode(
+                "utf-8", errors="ignore"
+            )
+            err_text = bytes(self.process.readAllStandardError()).decode(
+                "utf-8", errors="ignore"
+            )
             for line in self._consume_output(out_text):
                 self.output_buffer.append(line)
             for line in self._consume_output(err_text):
@@ -1075,7 +1232,7 @@ class Tulip3DSGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setAcceptDrops(True)
-        self.setWindowTitle(f'Tulip3DS {TU_VERSION}')
+        self.setWindowTitle(f"Tulip3DS {TU_VERSION}")
         self.resize(800, 600)
 
         # Setup main widget and layout
@@ -1088,15 +1245,15 @@ class Tulip3DSGUI(QMainWindow):
         self.lock = Lock()
         self.b9_loaded = False
         self.signals = signals
-        
+
         # Initialize compressed file processor
-        self.sevenZip_exec_path = './7za.exe' if os.name == 'nt' else '7zz'
+        self.sevenZip_exec_path = "./7za.exe" if os.name == "nt" else "7zz"
         self.file_processor = CompressedFileProcessor(self)
         self.file_processor.scan_finished.connect(self._on_scan_finished)
         self.file_processor.extract_finished.connect(self._on_extract_finished)
         self.file_processor.progress_updated.connect(self._on_extract_progress)
         self.file_processor.error_occurred.connect(self._on_processor_error)
-        
+
         # Scanning state
         self._scan_password = None
         self._extract_password = None
@@ -1112,44 +1269,48 @@ class Tulip3DSGUI(QMainWindow):
         # Setup UI components
         # SD Root picker
         sd_layout = QHBoxLayout()
-        self.sd_label = QLabel('主机内存卡：')
+        self.sd_label = QLabel("主机内存卡：")
         self.sd_combo = QComboBox()
-        self.sd_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.sd_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
 
         sd_layout.addWidget(self.sd_label)
         sd_layout.addWidget(self.sd_combo)
 
         # Movable.sed picker
-        self.movable_label = QLabel('安装的系统：')
+        self.movable_label = QLabel("安装的系统：")
         self.movable_combo = QComboBox()
         self.movable_combo.setEnabled(False)
-        self.movable_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.movable_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         sd_layout.addWidget(self.movable_label)
         sd_layout.addWidget(self.movable_combo)
 
-        self.sd_refresh_button = QPushButton('刷新')
+        self.sd_refresh_button = QPushButton("刷新")
         self.sd_refresh_button.clicked.connect(self.refresh_sd_combo)
         sd_layout.addWidget(self.sd_refresh_button)
         self.layout.addLayout(sd_layout)
 
         button_layout = QHBoxLayout()
 
-        self.add_cia_button = QPushButton('添加应用')
+        self.add_cia_button = QPushButton("添加应用")
         self.add_cia_button.setEnabled(False)
         self.add_cia_button.clicked.connect(self.add_cias)
         button_layout.addWidget(self.add_cia_button)
 
-        self.add_cdn_button = QPushButton('添加 CDN 应用目录')
+        self.add_cdn_button = QPushButton("添加 CDN 应用目录")
         self.add_cdn_button.setEnabled(False)
         self.add_cdn_button.clicked.connect(self.add_cdn)
         button_layout.addWidget(self.add_cdn_button)
 
-        self.add_folder_button = QPushButton('添加应用文件夹')
+        self.add_folder_button = QPushButton("添加应用文件夹")
         self.add_folder_button.setEnabled(False)
         self.add_folder_button.clicked.connect(self.add_folder)
         button_layout.addWidget(self.add_folder_button)
 
-        self.remove_button = QPushButton('移除选择的内容（按住CTRL键多选）')
+        self.remove_button = QPushButton("移除选择的内容（按住CTRL键多选）")
         self.remove_button.setEnabled(False)
         self.remove_button.clicked.connect(self.remove_selected)
         button_layout.addWidget(self.remove_button)
@@ -1163,19 +1324,35 @@ class Tulip3DSGUI(QMainWindow):
 
         # Title list
         self.title_list = QTreeWidget()
-        self.title_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.title_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.title_list.setIndentation(5)
-        self.title_list.setHeaderLabels(['图标', '文件路径', '应用 ID', '应用名', '应用大小', '安装状态'])
+        self.title_list.setHeaderLabels(
+            ["图标", "文件路径", "应用 ID", "应用名", "应用大小", "安装状态"]
+        )
         self.title_icon_size = QSize(18, 18)
         self.title_list.setIconSize(self.title_icon_size)
 
         # Set column resize modes for adaptive width
-        self.title_list.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Icon
-        self.title_list.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)  # File path
-        self.title_list.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)  # App ID
-        self.title_list.header().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # App name - adaptive
-        self.title_list.header().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # App size
-        self.title_list.header().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Install status
+        self.title_list.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )  # Icon
+        self.title_list.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Interactive
+        )  # File path
+        self.title_list.header().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Interactive
+        )  # App ID
+        self.title_list.header().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )  # App name - adaptive
+        self.title_list.header().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.ResizeToContents
+        )  # App size
+        self.title_list.header().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.ResizeToContents
+        )  # Install status
 
         self.title_list.header().setMinimumSectionSize(self.title_icon_size.width() + 8)
         self.title_list.setColumnWidth(0, self.title_icon_size.width() + 15)
@@ -1189,12 +1366,16 @@ class Tulip3DSGUI(QMainWindow):
         self.log_window = QTextEdit()
         self.log_window.setReadOnly(True)
         self.log_window.setMinimumHeight(100)
-        self.log_window.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.log_window.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # Enable word wrap to prevent horizontal expansion
+        self.log_window.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.log_window.setLineWrapMode(
+            QTextEdit.LineWrapMode.WidgetWidth
+        )  # Enable word wrap to prevent horizontal expansion
         self.splitter.addWidget(self.log_window)
 
         # Setup progress bar
-        self.progress_bar_text = QLabel('')
+        self.progress_bar_text = QLabel("")
         self.layout.addWidget(self.progress_bar_text)
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(100)
@@ -1207,16 +1388,16 @@ class Tulip3DSGUI(QMainWindow):
         # Control buttons and options
         control_layout = QHBoxLayout()
 
-        self.skip_contents = QCheckBox('跳过内容（仅将信息加入数据库）')
+        self.skip_contents = QCheckBox("跳过内容（仅将信息加入数据库）")
         control_layout.addWidget(self.skip_contents)
 
-        self.overwrite_saves = QCheckBox('覆盖已有存档')
+        self.overwrite_saves = QCheckBox("覆盖已有存档")
         control_layout.addWidget(self.overwrite_saves)
 
-        self.install_and_delete = QCheckBox('安装后删除文件')
+        self.install_and_delete = QCheckBox("安装后删除文件")
         control_layout.addWidget(self.install_and_delete)
 
-        self.start_button = QPushButton('开始安装')
+        self.start_button = QPushButton("开始安装")
         self.start_button.clicked.connect(self.start_install)
         control_layout.addWidget(self.start_button)
 
@@ -1238,7 +1419,9 @@ class Tulip3DSGUI(QMainWindow):
         status_info_layout.addWidget(self.status_label, 1)
 
         self.info_label = QLabel()
-        self.info_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.info_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         status_info_layout.addWidget(self.info_label, 1)
 
         self.layout.addLayout(status_info_layout)
@@ -1259,13 +1442,19 @@ class Tulip3DSGUI(QMainWindow):
         self.signals.remove_signal.connect(self.on_remove_signal)
         self.signals.force_install_signal.connect(self.on_force_install_signal)
         self.signals.export_finalize_signal.connect(self.on_export_finalize_signal)
-        self.signals.recover_pending_install_signal.connect(self.on_recover_pending_install_signal)
-        self.signals.delete_corrupted_files_signal.connect(self.on_delete_corrupted_files_signal)
+        self.signals.recover_pending_install_signal.connect(
+            self.on_recover_pending_install_signal
+        )
+        self.signals.delete_corrupted_files_signal.connect(
+            self.on_delete_corrupted_files_signal
+        )
         self.signals.finished_signal.connect(self.on_finished_signal)
 
         # Initial state
-        self.log(f'Tulip3DS {TU_VERSION} - https://github.com/OasisAkari/Tulip3DS')
-        self.log(f'By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。')
+        self.log(f"Tulip3DS {TU_VERSION} - https://github.com/OasisAkari/Tulip3DS")
+        self.log(
+            f"By OasisAkari （一只火狐） - https://stray-soul.com/，请勿二次出售（如闲鱼等平台）与商用。"
+        )
         self.log("就绪。")
 
         # if is_mica_supported():
@@ -1295,35 +1484,49 @@ class Tulip3DSGUI(QMainWindow):
         try:
             try:
                 url = "https://api.github.com/repos/OasisAkari/Tulip3DS/releases/latest"
-                request = Request(url, headers={
-                    "User-Agent": "Tulip3DS",
-                    "Accept": "application/vnd.github+json",
-                })
+                request = Request(
+                    url,
+                    headers={
+                        "User-Agent": "Tulip3DS",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
                 with urlopen(request, timeout=15) as response:
-                    data = response.read().decode('utf-8', errors='replace')
+                    data = response.read().decode("utf-8", errors="replace")
                     release_info = json.loads(data)
-                latest_version = self._normalize_release_version(release_info.get('tag_name', ''))
+                latest_version = self._normalize_release_version(
+                    release_info.get("tag_name", "")
+                )
             except Exception as e:
                 url = "https://stray-soul.com/statics/assets/files/TUVERSION"
-                request = Request(url, headers={
-                    "User-Agent": "Tulip3DS",
-                })
+                request = Request(
+                    url,
+                    headers={
+                        "User-Agent": "Tulip3DS",
+                    },
+                )
                 with urlopen(request, timeout=15) as response:
-                    release_info = response.read().decode('utf-8', errors='replace')
+                    release_info = response.read().decode("utf-8", errors="replace")
                 latest_version = self._normalize_release_version(release_info)
-            self.update_check_result_signal.emit(True, latest_version, 'https://stray-soul.com/ci.html', '')
+            self.update_check_result_signal.emit(
+                True, latest_version, "https://stray-soul.com/ci.html", ""
+            )
         except HTTPError as e:
-            self.update_check_result_signal.emit(False, '', '', f'HTTP {e.code}: {e.reason}')
+            self.update_check_result_signal.emit(
+                False, "", "", f"HTTP {e.code}: {e.reason}"
+            )
         except URLError as e:
-            self.update_check_result_signal.emit(False, '', '', f'网络错误：{e.reason}')
+            self.update_check_result_signal.emit(False, "", "", f"网络错误：{e.reason}")
         except Exception as e:
             traceback.print_exc()
-            self.update_check_result_signal.emit(False, '', '', str(e))
+            self.update_check_result_signal.emit(False, "", "", str(e))
 
-    def _on_update_check_finished(self, success: bool, latest_version: str, download_url: str, error_message: str):
+    def _on_update_check_finished(
+        self, success: bool, latest_version: str, download_url: str, error_message: str
+    ):
         if not success:
             self.log(f"更新检查失败：{error_message}")
-            if self.dialog and hasattr(self.dialog, 'update_button'):
+            if self.dialog and hasattr(self.dialog, "update_button"):
                 self.dialog.update_button.setEnabled(True)
                 self.dialog._update_button_text()
             return
@@ -1331,24 +1534,27 @@ class Tulip3DSGUI(QMainWindow):
         self._latest_version = latest_version
         self.log(f"最新版本：{self._latest_version}")
         self._update_download_url = download_url
-        self._update_available = self._compare_versions(self._latest_version, TU_VERSION) > 0
+        self._update_available = (
+            self._compare_versions(self._latest_version, TU_VERSION) > 0
+        )
         self._update_button_style()
-        if self.dialog and hasattr(self.dialog, '_update_button_text'):
+        if self.dialog and hasattr(self.dialog, "_update_button_text"):
             self.dialog._update_button_text()
-            if hasattr(self.dialog, 'update_button'):
+            if hasattr(self.dialog, "update_button"):
                 self.dialog.update_button.setEnabled(True)
 
     def _normalize_release_version(self, tag: str) -> str:
-        tag = (tag or '').strip()
+        tag = (tag or "").strip()
         if not tag:
-            return ''
-        tag = tag.lstrip('vV')
-        match = re.search(r'(\d+(?:\.\d+)*)', tag)
+            return ""
+        tag = tag.lstrip("vV")
+        match = re.search(r"(\d+(?:\.\d+)*)", tag)
         return match.group(1) if match else tag
 
     def _compare_versions(self, v1: str, v2: str) -> int:
         def normalize(v):
-            return [int(x) for x in v.split('.')]
+            return [int(x) for x in v.split(".")]
+
         v1_parts = normalize(v1)
         v2_parts = normalize(v2)
         for i in range(max(len(v1_parts), len(v2_parts))):
@@ -1385,27 +1591,28 @@ class Tulip3DSGUI(QMainWindow):
         self.sd_combo.clear()
         drives = self._scan_drives()
         for drive_info in drives:
-            self.sd_combo.addItem(drive_info['display'], drive_info['path'])
+            self.sd_combo.addItem(drive_info["display"], drive_info["path"])
 
     def _scan_drives(self):
         drives = []
         if is_windows:
             import string
+
             for letter in string.ascii_uppercase:
-                drive_path = f'{letter}:\\'
+                drive_path = f"{letter}:\\"
                 try:
                     if isdir(drive_path):
-                        tulip_path = join(drive_path, '3DS', 'Tulip3DS')
+                        tulip_path = join(drive_path, "3DS", "Tulip3DS")
                         if isdir(tulip_path):
-                            drives.append({
-                                'path': drive_path,
-                                'display': f'{drive_path}'
-                            })
+                            drives.append(
+                                {"path": drive_path, "display": f"{drive_path}"}
+                            )
                 except (OSError, PermissionError):
                     continue
         else:
             import os
-            volumes_path = '/Volumes'
+
+            volumes_path = "/Volumes"
             try:
                 if not isdir(volumes_path):
                     return drives
@@ -1414,12 +1621,11 @@ class Tulip3DSGUI(QMainWindow):
                     try:
                         if not isdir(volume_path):
                             continue
-                        tulip_path = join(volume_path, '3DS', 'Tulip3DS')
+                        tulip_path = join(volume_path, "3DS", "Tulip3DS")
                         if isdir(tulip_path):
-                            drives.append({
-                                'path': volume_path,
-                                'display': f'{volume_name}'
-                            })
+                            drives.append(
+                                {"path": volume_path, "display": f"{volume_name}"}
+                            )
                     except (OSError, PermissionError):
                         continue
             except (OSError, PermissionError):
@@ -1432,13 +1638,13 @@ class Tulip3DSGUI(QMainWindow):
         if not sd_path:
             self.movable_combo.setEnabled(False)
             return
-        tulip_path = join(sd_path, '3DS', 'Tulip3DS')
-        has_real = isfile(join(tulip_path, 'sysnand_movable.sed'))
-        has_virtual = isfile(join(tulip_path, 'emunand_movable.sed'))
+        tulip_path = join(sd_path, "3DS", "Tulip3DS")
+        has_real = isfile(join(tulip_path, "sysnand_movable.sed"))
+        has_virtual = isfile(join(tulip_path, "emunand_movable.sed"))
         if has_real:
-            self.movable_combo.addItem('真实系统', 'sysnand_movable.sed')
+            self.movable_combo.addItem("真实系统", "sysnand_movable.sed")
         if has_virtual:
-            self.movable_combo.addItem('虚拟系统', 'emunand_movable.sed')
+            self.movable_combo.addItem("虚拟系统", "emunand_movable.sed")
         if has_real or has_virtual:
             self.movable_combo.setEnabled(True)
         else:
@@ -1448,15 +1654,18 @@ class Tulip3DSGUI(QMainWindow):
         self.refresh_movable_combo()
         sd_path = self.sd_combo.currentData()
         if sd_path:
-            finish_path = join(sd_path, 'tufinish.bin')
+            finish_path = join(sd_path, "tufinish.bin")
             try:
                 load_tufinish(finish_path)
             except InvalidTUFinishError:
-                QMessageBox.critical(self, '错误',
-                                     f'卡内的{finish_path}是损坏的！\n\n'
-                                     f'这可能代表着 SD 卡或其文件系统出错。请使用磁盘检查工具查找错误。\n'
-                                     f'这也可能是 Tulip3DS 的问题（虽然不太可能）。\n\n'
-                                     f'请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 tufinish.bin，然后重新启动 Tulip3DS。')
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"卡内的{finish_path}是损坏的！\n\n"
+                    f"这可能代表着 SD 卡或其文件系统出错。请使用磁盘检查工具查找错误。\n"
+                    f"这也可能是 Tulip3DS 的问题（虽然不太可能）。\n\n"
+                    f"请停止操作，然后尝试检查一下，以防止出现更大的问题。但如果你想再试一次，请删除 SD 卡根目录的 tufinish.bin，然后重新启动 Tulip3DS。",
+                )
                 return
             load_seeddb(seeddb_paths[0])
         self.update_button_states()
@@ -1466,7 +1675,7 @@ class Tulip3DSGUI(QMainWindow):
         movable_file = self.movable_combo.currentData()
         if not sd_path or not movable_file:
             return None
-        return join(sd_path, '3DS', 'Tulip3DS', movable_file)
+        return join(sd_path, "3DS", "Tulip3DS", movable_file)
 
     def _add_cias(self, paths):
         if not self.enabled_button:
@@ -1486,31 +1695,59 @@ class Tulip3DSGUI(QMainWindow):
             dialog.exec()
 
     def add_cias(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "选择应用文件", "", "应用文件 (*.cia *.3ds *.cci *.zip *.7z *.rar)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择应用文件", "", "应用文件 (*.cia *.3ds *.cci *.zip *.7z *.rar)"
+        )
         if files:
             self._add_cias(files)
 
     def add_cdn(self):
         directory = QFileDialog.getExistingDirectory(self, "选择 CDN 应用文件夹")
         if directory:
-            if isfile(join(directory, 'tmd')):
+            if isfile(join(directory, "tmd")):
                 success, reason = self.add_cia(directory)
                 if not success:
-                    QMessageBox.critical(self, "错误", f"无法添加 {basename(directory)}：{reason}")
+                    QMessageBox.critical(
+                        self, "错误", f"无法添加 {basename(directory)}：{reason}"
+                    )
             else:
-                QMessageBox.critical(self, "错误", f"CDN 文件夹内未找到 tmd 文件：\n{directory}")
+                QMessageBox.critical(
+                    self, "错误", f"CDN 文件夹内未找到 tmd 文件：\n{directory}"
+                )
 
     def _add_folder(self, path, delete=False):
         if not self.enabled_button:
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
             return
         if path:
-            path = str(path).replace('\\', '/')
+            path = str(path).replace("\\", "/")
+
             failed = {}
+            depth_warning_shown = False
             for root, dirs, files in os.walk(path):
+                # 在遍历过程中统计嵌套深度，避免预扫描磁盘根目录导致长时间卡顿
+                if not depth_warning_shown:
+                    rel = os.path.relpath(root, path)
+                    depth = 0 if rel == "." else rel.count(os.sep) + 1
+                    if depth > 5:
+                        depth_warning_shown = True
+                        confirm = QMessageBox.question(
+                            self,
+                            "深度警告",
+                            f"检测到添加的 {path} 文件夹嵌套超过 5 层（当前已到达第 {depth} 层）。\n"
+                            "这可能是非预期行为（如误添加了整个磁盘，将会浪费非常长的时间用于扫描），是否继续扫描？",
+                            QMessageBox.StandardButton.Yes
+                            | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if confirm != QMessageBox.StandardButton.Yes:
+                            self.log(
+                                f"用户取消了深层文件夹的扫描（第 {depth} 层）：{path}"
+                            )
+                            return
                 for file in files:
-                    file_path = join(root, file).replace('\\', '/')
-                    if file_path.lower().endswith('.cia'):
+                    file_path = join(root, file).replace("\\", "/")
+                    if file_path.lower().endswith(".cia"):
                         success, reason = self.add_cia(str(file_path))
                         if not success:
                             failed[file_path] = reason
@@ -1520,15 +1757,19 @@ class Tulip3DSGUI(QMainWindow):
                                 self.log("已删除：" + file_path)
                                 _p = Path(file_path)
                                 if _p.parent.exists():
-                                    if not any(_p.parent.iterdir()) and _p.parent.name.startswith('tu-install-temp'):
+                                    if not any(
+                                        _p.parent.iterdir()
+                                    ) and _p.parent.name.startswith("tu-install-temp"):
                                         _pp = str(_p.parent).replace("\\", "/")
-                                        self.log(f'目录 {_pp} 为空，尝试删除...')
+                                        self.log(f"目录 {_pp} 为空，尝试删除...")
                                         _p.parent.rmdir()
-                                        self.log(f'已删除空目录：{_pp}')
+                                        self.log(f"已删除空目录：{_pp}")
                         else:
                             if delete:
                                 self.pending_remove.append(str(file_path))
-                    if file_path.lower().endswith('.3ds') or file_path.lower().endswith('.cci'):
+                    if file_path.lower().endswith(".3ds") or file_path.lower().endswith(
+                        ".cci"
+                    ):
                         self.add_game_card_image(str(file_path))
                         if delete:
                             self.pending_remove.append(str(file_path))
@@ -1536,11 +1777,15 @@ class Tulip3DSGUI(QMainWindow):
                 error_text = ["无法添加以下文件：\n"]
                 for path, reason in failed.items():
                     error_text += [f"{basename(path)}: {reason}\n"]
-                dialog = ScrollableErrorDialog(self, "添加软件失败", "\n".join(error_text))
+                dialog = ScrollableErrorDialog(
+                    self, "添加软件失败", "\n".join(error_text)
+                )
                 dialog.exec()
 
     def add_folder(self):
-        directory, _ = QFileDialog.getOpenFileName(self, "选择包含了应用文件的文件夹", "", "应用文件 (*.cia *.3ds *.cci)")
+        directory, _ = QFileDialog.getOpenFileName(
+            self, "选择包含了应用文件的文件夹", "", "应用文件 (*.cia *.3ds *.cci)"
+        )
         _dir = str(Path(directory).parent)
         self._add_folder(_dir)
 
@@ -1550,67 +1795,71 @@ class Tulip3DSGUI(QMainWindow):
             path = item.text(1)
             if path in self.readers:
                 del self.readers[path]
-            self.log(f'已从列表中移除：{path}')
+            self.log(f"已从列表中移除：{path}")
             self.log(f"检查待删除列表中是否包含 {path}...")
             self.log(*self.pending_remove)
             if path in self.pending_remove:
                 self.pending_remove.remove(path)
                 if os.path.exists(path):
                     try:
-                        self.log(f'正在删除目录 {path}...')
+                        self.log(f"正在删除目录 {path}...")
                         os.remove(path)
                         self.log("已删除：", path)
                         _p = Path(path)
                         if _p.parent.exists():
-                            if not any(_p.parent.iterdir()) and _p.parent.name.startswith('tu-install-temp'):
+                            if not any(
+                                _p.parent.iterdir()
+                            ) and _p.parent.name.startswith("tu-install-temp"):
                                 _pp = str(_p.parent).replace("\\", "/")
-                                self.log(f'目录 {_pp} 为空，尝试删除...')
+                                self.log(f"目录 {_pp} 为空，尝试删除...")
                                 _p.parent.rmdir()
-                                self.log(f'已删除空目录：{_pp}')
+                                self.log(f"已删除空目录：{_pp}")
                     except Exception as e:
-                        self.log(f'无法删除目录 {path}：{e}')
+                        self.log(f"无法删除目录 {path}：{e}")
             else:
-                self.log(f'待删除列表中不包含 {path}，无需执行任何操作。')
+                self.log(f"待删除列表中不包含 {path}，无需执行任何操作。")
         self.update_info_label()
 
     def _scan_compressed_file_qprocess(self, file_path, password=None):
         """使用QProcess异步扫描压缩文件"""
         if self._scanning:
             return
-        
+
         self._scanning = True
         self._scan_password = password
         self._scanning_file_path = file_path
         self.file_processor.scan_archive(file_path, password)
-    
+
     def _extract_file_qprocess(self, file_path, password=None):
         """使用QProcess异步提取压缩文件"""
         if self._extracting:
             return
-        
+
         self._extracting = True
         self._extract_password = password
         self._extracting_file_path = file_path
-        
+
         timestamp = str(int(time() * 1000))
-        temp_dir = join(dirname(abspath(__file__)), f'tu-install-temp-{timestamp}')
+        temp_dir = join(dirname(abspath(__file__)), f"tu-install-temp-{timestamp}")
         self._extract_temp_dir = temp_dir
-        
+
         # 创建临时目录
         os.makedirs(temp_dir, exist_ok=True)
-        
+
         self.file_processor.extract_archive(file_path, temp_dir, password)
-    
+
     def _on_scan_finished(self, success, files, need_password, result_data):
         """扫描完成的回调"""
         self._scanning = False
-        has_error = result_data.get('has_error', 0)
-        
+        has_error = result_data.get("has_error", 0)
+
         file_path = self._scanning_file_path
-        
+
         if has_error == 1:
             self.log("列出压缩包文件需要密码或文件已损坏：" + file_path)
-            password_dialog = PasswordInputDialog(self, basename(file_path), wrong=self._scan_password)
+            password_dialog = PasswordInputDialog(
+                self, basename(file_path), wrong=self._scan_password
+            )
             if password_dialog.exec() != QDialog.DialogCode.Accepted:
                 self.log("用户已取消操作：" + file_path)
                 self._scan_result = (False, [], need_password, None, False)
@@ -1621,40 +1870,44 @@ class Tulip3DSGUI(QMainWindow):
             return
         elif has_error != 0:
             self.log("扫描过程中发生了错误：" + str(has_error))
-            QMessageBox.critical(self, "错误", "解压过程中发生了错误：" + str(has_error))
+            QMessageBox.critical(
+                self, "错误", "解压过程中发生了错误：" + str(has_error)
+            )
             self._scan_result = (False, [], need_password, None, False)
         else:
             # include filename_encrypted flag from result_data
-            fe = bool(result_data.get('filename_encrypted', False))
+            fe = bool(result_data.get("filename_encrypted", False))
             self._scan_result = (True, files, need_password, self._scan_password, fe)
-    
+
     def _on_extract_finished(self, success, temp_dir, result_data):
         """提取完成的回调"""
         self._extracting = False
-        sub_item_error = result_data.get('sub_item_error', 0)
-        
+        sub_item_error = result_data.get("sub_item_error", 0)
+
         self.progress_bar.reset()
         self.progress_bar_text.setText("解压完成")
-        
+
         file_path = self._extracting_file_path
-        
+
         if sub_item_error == 1:
             self.log("密码错误或文件已损坏：" + file_path)
             password_dialog = PasswordInputDialog(self, basename(file_path), wrong=True)
             if password_dialog.exec() != QDialog.DialogCode.Accepted:
                 self.log("用户已取消操作：" + file_path)
-                self._extract_result = (False, '', None)
+                self._extract_result = (False, "", None)
                 return
             # 重新提取（带新密码）
             self._extract_file_qprocess(file_path, password_dialog.password)
             return
         elif sub_item_error != 0:
             self.log("解压过程中发生了错误：" + str(sub_item_error))
-            QMessageBox.critical(self, "错误", "解压过程中发生了错误：" + str(sub_item_error))
-            self._extract_result = (False, '', None)
+            QMessageBox.critical(
+                self, "错误", "解压过程中发生了错误：" + str(sub_item_error)
+            )
+            self._extract_result = (False, "", None)
         else:
             self._extract_result = (True, temp_dir, self._extract_password)
-    
+
     def _on_extract_progress(self, percentage, filename):
         """更新提取进度"""
         # Some backends (UnRAR) emit percentage=-1 when only filename is available.
@@ -1663,7 +1916,9 @@ class Tulip3DSGUI(QMainWindow):
         if percentage >= 0:
             # clamp to progress range
             try:
-                self.progress_bar.setValue(max(0, min(self.progress_bar.maximum(), int(percentage))))
+                self.progress_bar.setValue(
+                    max(0, min(self.progress_bar.maximum(), int(percentage)))
+                )
             except Exception:
                 pass
             self.progress_bar_text.setText(f"解压中：{filename}")
@@ -1672,14 +1927,13 @@ class Tulip3DSGUI(QMainWindow):
             # unknown percentage; only update filename text and log
             self.progress_bar_text.setText(f"解压中：{filename}")
             self.log(f"- - {filename}")
-    
+
     def _on_processor_error(self, error_msg):
         """处理处理器错误"""
         self.log(f"处理器错误：{error_msg}")
         self._scanning = False
         self._extracting = False
         QMessageBox.critical(self, "错误", f"处理压缩文件时出错：{error_msg}")
-
 
     def add_compressed_file(self, path: str) -> Tuple[bool, str]:
         """
@@ -1688,60 +1942,69 @@ class Tulip3DSGUI(QMainWindow):
         解压到临时文件夹并传递给_add_folder
         """
         try:
-            path = path.replace('\\', '/')
-            self.log(f'开始处理压缩文件：{path}')
+            path = path.replace("\\", "/")
+            self.log(f"开始处理压缩文件：{path}")
 
             confirm = QMessageBox.question(
                 self,
-                '确认解压',
-                f'检测到压缩文件：\n{path}\n\n是否现在解压？',
+                "确认解压",
+                f"检测到压缩文件：\n{path}\n\n是否现在解压？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes,
             )
             if confirm != QMessageBox.StandardButton.Yes:
-                self.log(f'已跳过压缩文件：{path}')
-                return True, ''
+                self.log(f"已跳过压缩文件：{path}")
+                return True, ""
 
-            scan_result, file_list, need_password, password, filename_encrypted = self._scan_compressed_file_sync(path)
-            archive_is_rar = path.lower().endswith('.rar')
+            scan_result, file_list, need_password, password, filename_encrypted = (
+                self._scan_compressed_file_sync(path)
+            )
+            archive_is_rar = path.lower().endswith(".rar")
 
             # RAR: if list is empty or encrypted hints appear, ask for password before filtering supported files
-            if archive_is_rar and (filename_encrypted or need_password or not file_list) and not password:
-                self.log('检测到 RAR 可能已加密或文件名被加密，需要输入密码')
+            if (
+                archive_is_rar
+                and (filename_encrypted or need_password or not file_list)
+                and not password
+            ):
+                self.log("检测到 RAR 可能已加密或文件名被加密，需要输入密码")
                 password_dialog = PasswordInputDialog(self, basename(path))
                 if password_dialog.exec() != QDialog.DialogCode.Accepted:
-                    self.log('用户已取消操作：' + path)
-                    return False, '用户已取消操作：' + path
+                    self.log("用户已取消操作：" + path)
+                    return False, "用户已取消操作：" + path
                 password = password_dialog.password
-                scan_result, file_list, need_password, password, filename_encrypted = self._scan_compressed_file_sync(path, password)
+                scan_result, file_list, need_password, password, filename_encrypted = (
+                    self._scan_compressed_file_sync(path, password)
+                )
 
             if not scan_result:
-                return False, '扫描压缩文件失败：' + path
+                return False, "扫描压缩文件失败：" + path
 
             if need_password and not password:
                 password_dialog = PasswordInputDialog(self, basename(path))
                 if password_dialog.exec() != QDialog.DialogCode.Accepted:
-                    self.log('用户已取消操作：' + path)
-                    return False, '用户已取消操作：' + path
+                    self.log("用户已取消操作：" + path)
+                    return False, "用户已取消操作：" + path
                 password = password_dialog.password
 
             self.switch_button_states(False)
-            valid_files = [f for f in file_list if f.lower().endswith(('.cia', '.3ds', '.cci'))]
+            valid_files = [
+                f for f in file_list if f.lower().endswith((".cia", ".3ds", ".cci"))
+            ]
             if not valid_files and archive_is_rar and not password:
-                return False, 'RAR 压缩包需要密码或内部不包含 .cia/.3ds/.cci 文件'
+                return False, "RAR 压缩包需要密码或内部不包含 .cia/.3ds/.cci 文件"
             if not valid_files:
-                return False, '压缩包内没有找到 .cia/.3ds/.cci 文件'
+                return False, "压缩包内没有找到 .cia/.3ds/.cci 文件"
 
-            self.log(f'找到 {len(valid_files)} 个符合格式的文件')
-            temp_dir = ''
+            self.log(f"找到 {len(valid_files)} 个符合格式的文件")
+            temp_dir = ""
             try:
                 QApplication.processEvents()
                 extract_result, temp_dir, _ = self._extract_file_sync(path, password)
                 if not extract_result:
-                    raise Exception('提取文件失败')
+                    raise Exception("提取文件失败")
 
-                self.log(f'已解压到临时目录：{temp_dir}')
-
+                self.log(f"已解压到临时目录：{temp_dir}")
 
             except Exception as e:
                 try:
@@ -1749,33 +2012,33 @@ class Tulip3DSGUI(QMainWindow):
                         shutil.rmtree(temp_dir)
                 except:
                     pass
-                return False, f'解压失败：{e}'
+                return False, f"解压失败：{e}"
 
             finally:
                 self.progress_bar.setValue(0)
-                self.progress_bar_text.setText('')
+                self.progress_bar_text.setText("")
                 QApplication.processEvents()
 
-            self.log('将临时目录中的文件添加到列表...')
+            self.log("将临时目录中的文件添加到列表...")
             self._add_folder(temp_dir, delete=True)
 
-            return True, ''
+            return True, ""
 
         except Exception as e:
-            self.log(f'处理压缩文件时出错：{e}')
+            self.log(f"处理压缩文件时出错：{e}")
             traceback.print_exc()
-            return False, f'处理压缩文件时出错：{e}'
+            return False, f"处理压缩文件时出错：{e}"
         finally:
             self.switch_button_states(True)
-    
+
     def _scan_compressed_file_sync(self, file_path, password=None):
         """同步包装器：等待扫描完成并返回结果"""
         # 初始化结果
         self._scan_result = None
-        
+
         # 启动异步扫描
         self._scan_compressed_file_qprocess(file_path, password)
-        
+
         # 等待扫描完成（阻塞主线程，但允许事件处理）
         max_wait = 300  # 最多等待30秒
         wait_count = 0
@@ -1783,21 +2046,21 @@ class Tulip3DSGUI(QMainWindow):
             QApplication.processEvents()
             sleep(0.1)
             wait_count += 1
-        
+
         if self._scan_result:
             return self._scan_result
         else:
             # return (success, files, need_password, password, filename_encrypted)
             return False, [], False, None, False
-    
+
     def _extract_file_sync(self, file_path, password=None):
         """同步包装器：等待提取完成并返回结果"""
         # 初始化结果
         self._extract_result = None
-        
+
         # 启动异步提取
         self._extract_file_qprocess(file_path, password)
-        
+
         # 等待提取完成（阻塞主线程，但允许事件处理）
         max_wait = 3000  # 最多等待300秒
         wait_count = 0
@@ -1805,52 +2068,55 @@ class Tulip3DSGUI(QMainWindow):
             QApplication.processEvents()
             sleep(0.1)
             wait_count += 1
-        
+
         if self._extract_result:
             return self._extract_result
         else:
-            return False, '', None
+            return False, "", None
 
     def add_cia(self, path: str) -> Tuple[bool, str]:
         try:
-            path = path.replace('\\', '/')
-            
+            path = path.replace("\\", "/")
+
             # 检查是否是压缩文件
-            compressed_extensions = ('.zip', '.7z', '.rar')
+            compressed_extensions = (".zip", ".7z", ".rar")
             if path.lower().endswith(compressed_extensions):
                 return self.add_compressed_file(path)
-            
-            if path.lower().endswith('.3ds') or path.lower().endswith('.cci'):
+
+            if path.lower().endswith(".3ds") or path.lower().endswith(".cci"):
                 return self.add_game_card_image(path)
             with self.lock:
                 if path in self.readers:
-                    return False, '应用已添加在列表中'
+                    return False, "应用已添加在列表中"
 
-                if path.lower().endswith('.cia'):
+                if path.lower().endswith(".cia"):
                     reader = CIAReader(path)
                 else:
                     reader = CDNReader(path)
 
+                if reader.tmd.title_id.startswith("00048"):
+                    return False, "不支持 DSiWare 应用"
 
-                if reader.tmd.title_id.startswith('00048'):
-                    return False, '不支持 DSiWare 应用'
-
-                if self.title_list.findItems(reader.tmd.title_id, Qt.MatchFlag.MatchExactly, column=2):
-                    return False, '应用已添加在列表中'
+                if self.title_list.findItems(
+                    reader.tmd.title_id, Qt.MatchFlag.MatchExactly, column=2
+                ):
+                    return False, "应用已添加在列表中"
 
                 self.readers[path] = reader
 
                 # Get title name
                 try:
-                    title_name = reader.contents[0].exefs.icon.get_app_title().short_desc
+                    title_name = (
+                        reader.contents[0].exefs.icon.get_app_title().short_desc
+                    )
                 except:
-                    title_name = '（没有软件名）'
+                    title_name = "（没有软件名）"
 
                 # Get icon
                 try:
                     icon = reader.contents[0].exefs.icon.icon_large
                     icon_data = BytesIO()
-                    icon.save(icon_data, format='PNG')
+                    icon.save(icon_data, format="PNG")
                     pixmap = QPixmap()
                     pixmap.loadFromData(icon_data.getvalue())
                 except:
@@ -1861,11 +2127,11 @@ class Tulip3DSGUI(QMainWindow):
                 try:
                     cover_art = reader.contents[0].exefs.icon.icon_large
                     cover_art_data = BytesIO()
-                    cover_art.save(cover_art_data, format='PNG')
+                    cover_art.save(cover_art_data, format="PNG")
                     cover_art_pixmap = QPixmap()
                     cover_art_pixmap.loadFromData(cover_art_data.getvalue())
                 except:
-                    self.log("无法加载" + title_name + "的缩略图，跳过加载。" )
+                    self.log("无法加载" + title_name + "的缩略图，跳过加载。")
                     traceback.print_exc()
                     cover_art_pixmap = QPixmap()  # Empty pixmap if no cover art
 
@@ -1883,26 +2149,32 @@ class Tulip3DSGUI(QMainWindow):
                         if new_total_size > free_space:
                             # Remove reader from the dictionary before rejecting
                             del self.readers[path]
-                            error_msg = (f'SD 卡可用容量不足！\n\n'
-                                       f'待添加应用大小: {format_file_size(title_size)}\n'
-                                       f'SD 卡可用容量: {format_file_size(free_space)}\n\n'
-                                       f'缺少空间: {format_file_size(new_total_size - free_space)}')
+                            error_msg = (
+                                f"SD 卡可用容量不足！\n\n"
+                                f"待添加应用大小: {format_file_size(title_size)}\n"
+                                f"SD 卡可用容量: {format_file_size(free_space)}\n\n"
+                                f"缺少空间: {format_file_size(new_total_size - free_space)}"
+                            )
                             return False, error_msg
                     except Exception as e:
-                        self.log(f'检查 SD 卡容量失败: {e}')
+                        self.log(f"检查 SD 卡容量失败: {e}")
 
-                item = QTreeWidgetItem([
-                    '',
-                    path,
-                    str(reader.tmd.title_id).upper(),
-                    title_name,
-                    format_file_size(title_size),
-                    statuses.get(InstallStatus.Waiting)
-                ])
+                item = QTreeWidgetItem(
+                    [
+                        "",
+                        path,
+                        str(reader.tmd.title_id).upper(),
+                        title_name,
+                        format_file_size(title_size),
+                        statuses.get(InstallStatus.Waiting),
+                    ]
+                )
 
                 self.title_list.addTopLevelItem(item)
 
-                display_pixmap = cover_art_pixmap if not cover_art_pixmap.isNull() else pixmap
+                display_pixmap = (
+                    cover_art_pixmap if not cover_art_pixmap.isNull() else pixmap
+                )
                 if not display_pixmap.isNull():
                     scaled_pixmap = display_pixmap.scaled(
                         self.title_icon_size,
@@ -1910,20 +2182,24 @@ class Tulip3DSGUI(QMainWindow):
                         Qt.TransformationMode.SmoothTransformation,
                     )
                     icon_label = QLabel()
-                    icon_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    icon_label.setAlignment(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    )
                     icon_label.setPixmap(scaled_pixmap)
-                    icon_label.setStyleSheet('background: transparent; border: none;')
-                    icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    icon_label.setStyleSheet("background: transparent; border: none;")
+                    icon_label.setAttribute(
+                        Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+                    )
                     self.title_list.setItemWidget(item, 0, icon_label)
                 self.update_info_label()
-                return True, ''
+                return True, ""
 
         except CIAError as e:
-            return False, f'无法读取 CIA：{e}'
+            return False, f"无法读取 CIA：{e}"
         except CDNError as e:
-            return False, f'无法读取 CDN：{e}'
+            return False, f"无法读取 CDN：{e}"
         except TitleMetadataError as e:
-            return False, f'无法读取 TMD：{e}'
+            return False, f"无法读取 TMD：{e}"
         except Exception as e:
             return False, str(e)
 
@@ -1931,29 +2207,35 @@ class Tulip3DSGUI(QMainWindow):
         changed_button = False
         try:
             with self.lock:
-                path = path.replace('\\', '/')
+                path = path.replace("\\", "/")
                 if not self.skip_game_card_confirm:
                     info = QMessageBox(self)
                     info.setWindowTitle("添加游戏卡镜像")
-                    info.setText(f"{path} 是一个游戏卡镜像文件。\n"
-                                 f"本工具可以帮你预先转换好文件为 CIA 格式，但这需要一点时间转换。\n"
-                                 f"是否继续？")
+                    info.setText(
+                        f"{path} 是一个游戏卡镜像文件。\n"
+                        f"本工具可以帮你预先转换好文件为 CIA 格式，但这需要一点时间转换。\n"
+                        f"是否继续？"
+                    )
                     yes_button = info.addButton("是", QMessageBox.ButtonRole.YesRole)
-                    all_yes_button = info.addButton("全是（本次安装）", QMessageBox.ButtonRole.YesRole)
+                    all_yes_button = info.addButton(
+                        "全是（本次安装）", QMessageBox.ButtonRole.YesRole
+                    )
                     no_button = info.addButton("否", QMessageBox.ButtonRole.NoRole)
                     info.setDefaultButton(yes_button)
                     info.exec()
 
                     clicked_button = info.clickedButton()
                     if clicked_button == no_button:
-                        self.log('取消添加游戏卡镜像：' + path)
+                        self.log("取消添加游戏卡镜像：" + path)
                         return
                     if clicked_button == all_yes_button:
                         self.skip_game_card_confirm = True
                 self.switch_button_states(False)
                 changed_button = True
                 timestamp = str(int(time() * 1000))
-                tmp_dir = str(Path(file_parent) / f'tu-install-temp-{timestamp}').replace('\\', '/')
+                tmp_dir = str(
+                    Path(file_parent) / f"tu-install-temp-{timestamp}"
+                ).replace("\\", "/")
                 # Check free space on the drive where the temp folder will be created.
                 try:
                     # Determine the drive/root for the tmp_dir (works on Windows and POSIX)
@@ -1964,30 +2246,36 @@ class Tulip3DSGUI(QMainWindow):
                     free_space = usage.free
                     if required_size > free_space:
                         # Alert the user and abort adding this game card image
-                        msg = (f'临时目录所在磁盘可用容量不足，无法在此处转换文件。\n\n'
-                               f'源文件大小: {format_file_size(required_size)}\n'
-                               f'可用空间: {format_file_size(free_space)}\n\n'
-                               f'请清理磁盘或选择其他位置启动程序后重试。')
-                        self.log('取消转换游戏卡镜像，磁盘空间不足：' + path)
+                        msg = (
+                            f"临时目录所在磁盘可用容量不足，无法在此处转换文件。\n\n"
+                            f"源文件大小: {format_file_size(required_size)}\n"
+                            f"可用空间: {format_file_size(free_space)}\n\n"
+                            f"请清理磁盘或选择其他位置启动程序后重试。"
+                        )
+                        self.log("取消转换游戏卡镜像，磁盘空间不足：" + path)
                         return False, msg
                 except Exception as e:
                     # If we cannot determine disk usage for any reason, log and continue.
-                    self.log(f'检查临时目录磁盘容量失败: {e}')
+                    self.log(f"检查临时目录磁盘容量失败: {e}")
                 os.makedirs(tmp_dir, exist_ok=True)
-                self.log(f'正在转换游戏卡镜像 {path} 为 CIA 格式...')
-                conventer(log=self.log,
-                          verbose=True,
-                          game=[path],
-                          output=tmp_dir,
-                          boot9=b9_paths[0],
-                          ignore_bad_hashes=self.force_install,
-                          on_progress=lambda percent, read, size: self.signals.convert_progress_signal.emit(percent, read, size))
-            self.log(f'转换完成，已缓存到 {tmp_dir}。正在添加到列表中...')
+                self.log(f"正在转换游戏卡镜像 {path} 为 CIA 格式...")
+                conventer(
+                    log=self.log,
+                    verbose=True,
+                    game=[path],
+                    output=tmp_dir,
+                    boot9=b9_paths[0],
+                    ignore_bad_hashes=self.force_install,
+                    on_progress=lambda percent, read, size: (
+                        self.signals.convert_progress_signal.emit(percent, read, size)
+                    ),
+                )
+            self.log(f"转换完成，已缓存到 {tmp_dir}。正在添加到列表中...")
 
             self._add_folder(tmp_dir, delete=True)
-            self.log(f'将缓存文件添加到待删除列表。')
+            self.log(f"将缓存文件添加到待删除列表。")
         except Exception as e:
-            self.log(f'无法添加游戏卡镜像：{e}')
+            self.log(f"无法添加游戏卡镜像：{e}")
             self.log(traceback.format_exc())
             return False, str(e)
         finally:
@@ -1995,7 +2283,7 @@ class Tulip3DSGUI(QMainWindow):
             self.progress_bar_text.setText("")
             if changed_button:
                 self.switch_button_states(True)
-        return True, ''
+        return True, ""
 
     # Drag and drop support
     def dragEnterEvent(self, e: QDragEnterEvent):
@@ -2003,30 +2291,36 @@ class Tulip3DSGUI(QMainWindow):
 
     def dropEvent(self, e):
         if not (e.mimeData().hasText() and self.add_cia_button.isEnabled()):
-            return QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录及 movable.sed。")
+            return QMessageBox.warning(
+                self, "错误", "请先选择 SD 卡根目录及 movable.sed。"
+            )
         filePathList = e.mimeData().text()
-        filePath = filePathList.split('\n')
+        filePath = filePathList.split("\n")
         self.log("放置了文件：" + str(filePath))
         cias = []
         dirs = []
         cards = []
         for p in filePath:
-            p = p.replace('file:///', '', 1).strip()
-            if p and sys.platform == 'darwin':
-                p = '/' + p
+            p = p.replace("file:///", "", 1).strip()
+            if p and sys.platform == "darwin":
+                p = "/" + p
             if p:
                 p = urllib.parse.unquote(p)
             if p and isfile(p):
-                if p.lower().endswith('.cia'):
+                if p.lower().endswith(".cia"):
                     cias.append(p)
-                if p.lower().endswith('.3ds') or p.lower().endswith('.cci'):
+                if p.lower().endswith(".3ds") or p.lower().endswith(".cci"):
                     cards.append(p)
-                if p.lower().endswith(".zip") or p.lower().endswith(".7z") or p.lower().endswith(".rar"):
+                if (
+                    p.lower().endswith(".zip")
+                    or p.lower().endswith(".7z")
+                    or p.lower().endswith(".rar")
+                ):
                     cias.append(p)
             elif p and isdir(p):
                 dirs.append(p)
             else:
-                self.log(p + '不是文件或文件夹，跳过。')
+                self.log(p + "不是文件或文件夹，跳过。")
         self.log("识别到的文件：" + str(cias))
         self.log("识别到的文件夹：" + str(dirs))
         self.log("识别到的游戏卡镜像：" + str(cards))
@@ -2070,34 +2364,39 @@ class Tulip3DSGUI(QMainWindow):
         app_size_str = format_file_size(total_app_size)
 
         if total_str and free_str:
-            info_text = f'SD 卡总大小: {total_str} | 可用容量: {free_str} | 列表应用总大小: {app_size_str}'
+            info_text = f"SD 卡总大小: {total_str} | 可用容量: {free_str} | 列表应用总大小: {app_size_str}"
         else:
-            info_text = f'列表应用总大小: {app_size_str}'
+            info_text = f"列表应用总大小: {app_size_str}"
 
         self.info_label.setText(info_text)
 
     def _update_button_states(self):
         try:
-            self.enabled_button = all([
-                           bool(self.sd_combo.currentData()),
-                           bool(self.movable_combo.currentData()),
-                           ])
+            self.enabled_button = all(
+                [
+                    bool(self.sd_combo.currentData()),
+                    bool(self.movable_combo.currentData()),
+                ]
+            )
 
             self.switch_button_states(self.enabled_button)
             self.update_info_label()
 
             if self.enabled_button:
-                if self.crypto is not None and ((m := self.get_selected_movable_path()) is not None):
+                if self.crypto is not None and (
+                    (m := self.get_selected_movable_path()) is not None
+                ):
                     self.crypto.setup_sd_key_from_file(m)
-                self.status_label.setText('就绪，可拖拽文件或文件夹至窗口添加应用（*.cia / *.3ds / *.cci）')
+                self.status_label.setText(
+                    "就绪，可拖拽文件或文件夹至窗口添加应用（*.cia / *.3ds / *.cci）"
+                )
             else:
-                self.status_label.setText('请选择 SD 卡根目录及 movable.sed。')
+                self.status_label.setText("请选择 SD 卡根目录及 movable.sed。")
         except Exception as e:
             traceback.print_exc()
             self.log("发生错误：" + str(e))
             self.enabled_button = False
         return self.enabled_button
-
 
     def update_button_states(self):
         # anti debounce
@@ -2105,9 +2404,8 @@ class Tulip3DSGUI(QMainWindow):
         d()
         self.repaint()
 
-
-    def log(self, *msg, end='\n'):
-        timestamp = datetime.now().strftime('%H:%M:%S')
+    def log(self, *msg, end="\n"):
+        timestamp = datetime.now().strftime("%H:%M:%S")
         log_msg = f"{timestamp} - {end.join(msg)}"
         self.signals.log_signal.emit(log_msg)
 
@@ -2121,26 +2419,31 @@ class Tulip3DSGUI(QMainWindow):
 
     def save_log(self):
         confirm = QMessageBox.question(
-            self, "导出日志", "你确定要导出日志吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            self,
+            "导出日志",
+            "你确定要导出日志吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            timestamp = datetime.now().strftime('%H-%M-%S')
-            logs_path = Path(os.path.abspath('.')) / 'logs'
+            timestamp = datetime.now().strftime("%H-%M-%S")
+            logs_path = Path(os.path.abspath(".")) / "logs"
             logs_path.mkdir(exist_ok=True)
-            save_path = logs_path / f'tulip3ds-{timestamp}.log'
-            with open(save_path, 'w', encoding='utf-8') as f:
+            save_path = logs_path / f"tulip3ds-{timestamp}.log"
+            with open(save_path, "w", encoding="utf-8") as f:
                 f.write(self.log_window.toPlainText())
 
-            QMessageBox.information(self, '成功', f'日志已保存到 {save_path}！')
+            QMessageBox.information(self, "成功", f"日志已保存到 {save_path}！")
             os.startfile(str(save_path.parent))
-
 
     def on_progress(self, total_percent: float, total_read: int, size: int):
         self.progress_bar.setValue(int(total_percent))
         if taskbar:
             max_percentage = 100 * self.total_items
-            taskbar.SetProgressValue(int(self.winId()), int(total_percent + self.finished_percent), max_percentage)
+            taskbar.SetProgressValue(
+                int(self.winId()),
+                int(total_percent + self.finished_percent),
+                max_percentage,
+            )
 
     def on_convert_progress(self, percent: float, read: int, size: int):
         """处理转换进度"""
@@ -2150,11 +2453,11 @@ class Tulip3DSGUI(QMainWindow):
             taskbar.SetProgressValue(int(self.winId()), int(percent), 100)
 
     def on_error(self, exc: Exception):
-        self.log(f'错误：{exc}')
+        self.log(f"错误：{exc}")
         self.signals.log_signal.emit(f"错误：{str(exc)}")
 
     def on_cia_start(self, idx: int):
-        self.log(f'开始安装第 {idx + 1} 个 CIA...')
+        self.log(f"开始安装第 {idx + 1} 个 CIA...")
         self.progress_bar_text.setText(f"正在安装第 {idx + 1} 个应用...")
         find_item = self.title_list.topLevelItem(idx)
         if find_item:
@@ -2162,45 +2465,50 @@ class Tulip3DSGUI(QMainWindow):
         if taskbar:
             self.finished_percent = idx * 100
             max_percentage = 100 * self.total_items
-            taskbar.SetProgressValue(int(self.winId()), self.finished_percent, max_percentage)
+            taskbar.SetProgressValue(
+                int(self.winId()), self.finished_percent, max_percentage
+            )
 
     def on_status_update(self, path: str, status: InstallStatus):
         status_text = status.name if isinstance(status, InstallStatus) else str(status)
         cn_text = {
-            'Waiting': '等待中',
-            'Starting': '安装中',
-            'Writing': '写入中',
-            'Finishing': '完成中',
-            'Done': '完成',
-            'Failed': '失败',
-            'Warning': '警告',
+            "Waiting": "等待中",
+            "Starting": "安装中",
+            "Writing": "写入中",
+            "Finishing": "完成中",
+            "Done": "完成",
+            "Failed": "失败",
+            "Warning": "警告",
         }
-        self.log(f'状态更新 {path}：{cn_text[status_text]}')
+        self.log(f"状态更新 {path}：{cn_text[status_text]}")
         # Find and update the item in the tree widget
         items = self.title_list.findItems(path, Qt.MatchFlag.MatchExactly, 1)
         if items:
             items[0].setText(5, cn_text[status_text])
 
     def on_installed_signal(self, lst: List[str], copied: bool, application_count: int):
-        tex = '已完成安装。\n'
+        tex = "已完成安装。\n"
         if copied:
             tex += "Tulip3DS Client 已被复制到 SD 卡。\n"
         root_ = self.sd_combo.currentData()
         lst_dir = os.listdir(root_)
-        if 'boot.firm' not in lst_dir or 'boot.3dsx' not in lst_dir:
-            tex += ("重要警告：SD 卡根目录中未找到 boot.firm 或 boot.3dsx 文件。\n"
-                    "请确保你已将 boot.firm 或 boot.3dsx 文件放在 SD 卡根目录中，以便能够正常启动完成安装程序。（Tulip3DS Client）\n")
+        if "boot.firm" not in lst_dir or "boot.3dsx" not in lst_dir:
+            tex += (
+                "重要警告：SD 卡根目录中未找到 boot.firm 或 boot.3dsx 文件。\n"
+                "请确保你已将 boot.firm 或 boot.3dsx 文件放在 SD 卡根目录中，以便能够正常启动完成安装程序。（Tulip3DS Client）\n"
+            )
         if application_count > 300:
-            tex += "注意：安装的应用数量超过 300 个，主机可能会无法正常显示所有应用。\n\n"
-        tex += '成功安装了下列应用：\n'
+            tex += (
+                "注意：安装的应用数量超过 300 个，主机可能会无法正常显示所有应用。\n\n"
+            )
+        tex += "成功安装了下列应用：\n"
         dial = ListBoxDialog(self, "以下应用已成功安装", tex, lst)
         dial.show()
-
 
     def on_failed_signal(self, lst: List[str]):
         if not lst:
             return
-        tex = '以下应用安装失败，请检查输出查看问题：\n'
+        tex = "以下应用安装失败，请检查输出查看问题：\n"
         dial = ListBoxDialog(self, "以下应用安装失败", tex, lst)
         dial.show()
 
@@ -2214,12 +2522,14 @@ class Tulip3DSGUI(QMainWindow):
                         os.remove(path)
                         self.log(f"已删除 {path}")
                         _p = Path(path)
-                        if _p.parent.exists() and _p.parent.name.startswith('tu-install-temp'):
+                        if _p.parent.exists() and _p.parent.name.startswith(
+                            "tu-install-temp"
+                        ):
                             if not any(_p.parent.iterdir()):
                                 _pp = str(_p.parent).replace("\\", "/")
-                                self.log(f'目录 {_pp} 为空，尝试删除...')
+                                self.log(f"目录 {_pp} 为空，尝试删除...")
                                 _p.parent.rmdir()
-                                self.log(f'已删除空目录：{_pp}')
+                                self.log(f"已删除空目录：{_pp}")
                     except Exception as e:
                         self.log(f"无法删除 {path}：{str(e)}")
             self.pending_remove.clear()
@@ -2235,7 +2545,9 @@ class Tulip3DSGUI(QMainWindow):
     def on_force_install_signal(self, force: bool):
         self.force_install = force
         if force:
-            self.log("已启用强制安装模式。请注意，这很可能会导致安装的应用无法正常工作。")
+            self.log(
+                "已启用强制安装模式。请注意，这很可能会导致安装的应用无法正常工作。"
+            )
         else:
             self.log("已禁用强制安装模式。")
 
@@ -2243,8 +2555,8 @@ class Tulip3DSGUI(QMainWindow):
         if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        src = Path(file_parent) / 'bin' / 'common' / 'Tulip3DS-Client.cia'
-        dst = Path(self.sd_combo.currentData()) / 'Tulip3DS-Client.cia'
+        src = Path(file_parent) / "bin" / "common" / "Tulip3DS-Client.cia"
+        dst = Path(self.sd_combo.currentData()) / "Tulip3DS-Client.cia"
         try:
             shutil.copy(src, dst)
             QMessageBox.information(self, "成功", f"Tulip3DS Client 已导出到 {dst}。")
@@ -2256,27 +2568,30 @@ class Tulip3DSGUI(QMainWindow):
         if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
-        pending_path = Path(self.sd_combo.currentData()) / 'tu-pending'
+        pending_path = Path(self.sd_combo.currentData()) / "tu-pending"
         if not pending_path.exists() or not pending_path.is_dir():
-            QMessageBox.warning(self, "错误", f"未找到 tu-pending 文件夹：{pending_path}")
+            QMessageBox.warning(
+                self, "错误", f"未找到 tu-pending 文件夹：{pending_path}"
+            )
             return
         try:
             for p in pending_path.iterdir():
-                self.log('正在恢复未完成的安装：' + str(p))
-                shutil.move(str(p), str(pending_path / '..'))
+                self.log("正在恢复未完成的安装：" + str(p))
+                shutil.move(str(p), str(pending_path / ".."))
         except Exception:
             self.log(f"恢复未完成的安装失败：")
             self.log(traceback.format_exc())
-        QMessageBox.information(self, "信息", "已尝试恢复未完成的安装。请检查控制台输出。")
+        QMessageBox.information(
+            self, "信息", "已尝试恢复未完成的安装。请检查控制台输出。"
+        )
         shutil.rmtree(pending_path)
-
 
     def on_delete_corrupted_files_signal(self):
         if not self.sd_combo.currentData():
             QMessageBox.warning(self, "错误", "请先选择 SD 卡根目录。")
             return
         deleted = False
-        for p in Path(self.sd_combo.currentData()).glob('tu-install-temp*'):
+        for p in Path(self.sd_combo.currentData()).glob("tu-install-temp*"):
             deleted = True
             if p.is_dir():
                 try:
@@ -2302,7 +2617,7 @@ class Tulip3DSGUI(QMainWindow):
             # Re-enable install button
             self.start_button.setEnabled(True)
             self.switch_button_states(True)
-            self.progress_bar_text.setText('')
+            self.progress_bar_text.setText("")
             self.progress_bar.reset()
             self.skip_game_card_confirm = False
 
@@ -2317,15 +2632,16 @@ class Tulip3DSGUI(QMainWindow):
                 "安装完成",
                 "请检查窗口以获取安装结果。",
                 QSystemTrayIcon.MessageIcon.Information,
-                2000  # Duration in milliseconds
+                2000,  # Duration in milliseconds
             )
         except Exception as e:
             self.log(f"清理安装状态时发生错误：{str(e)}")
 
-
     def start_install(self):
         if not self.readers:
-            self.signals.log_signal.emit("你还没有添加任何应用，请先添加一个再进行安装。")
+            self.signals.log_signal.emit(
+                "你还没有添加任何应用，请先添加一个再进行安装。"
+            )
             return
 
         # Disable install button
@@ -2334,7 +2650,6 @@ class Tulip3DSGUI(QMainWindow):
         self.log("开始安装...")
         self.install_thread = Thread(target=self.install)
         self.install_thread.start()
-
 
     def install(self):
         try:
@@ -2361,15 +2676,29 @@ class Tulip3DSGUI(QMainWindow):
                 skip_contents=self.skip_contents.isChecked(),
                 overwrite_saves=self.overwrite_saves.isChecked(),
                 force_install=self.force_install,
-                crypto=self.crypto
+                crypto=self.crypto,
             )
 
             # Set up event handlers
-            custom_install.event.on_log_msg += lambda msg, **kwargs: self.signals.log_signal.emit(str(msg))
-            custom_install.event.update_percentage += lambda total_percent, total_read, size: self.signals.progress_signal.emit(total_percent, int(total_read), int(size))
-            custom_install.event.on_error += lambda exc: self.signals.error_signal.emit(exc)
-            custom_install.event.on_cia_start += lambda idx: self.signals.cia_start_signal.emit(idx)
-            custom_install.event.update_status += lambda path, status: self.signals.status_signal.emit(path, status)
+            custom_install.event.on_log_msg += lambda msg, **kwargs: (
+                self.signals.log_signal.emit(str(msg))
+            )
+            custom_install.event.update_percentage += (
+                lambda total_percent, total_read, size: (
+                    self.signals.progress_signal.emit(
+                        total_percent, int(total_read), int(size)
+                    )
+                )
+            )
+            custom_install.event.on_error += lambda exc: self.signals.error_signal.emit(
+                exc
+            )
+            custom_install.event.on_cia_start += lambda idx: (
+                self.signals.cia_start_signal.emit(idx)
+            )
+            custom_install.event.update_status += lambda path, status: (
+                self.signals.status_signal.emit(path, status)
+            )
 
             # Prepare readers in the order they appear in the tree
             root = self.title_list.invisibleRootItem()
@@ -2389,43 +2718,44 @@ class Tulip3DSGUI(QMainWindow):
 
             # Check for id0
             if not custom_install.check_for_id0():
-                raise Exception(f'SD 卡的 “Nintendo 3DS” 文件夹中找不到 id0 {custom_install.crypto.id0.hex()} 文件夹。\n'
-                            f'\n'
-                            f'在使用 Tulip3DS 前，你应先确保这张 SD 卡的格式为 FAT32，且插入主机开机过一次。\n'
-                            f'\n'
-                            f'或者，请确保你使用了正确的 movable.sed 文件。')
+                raise Exception(
+                    f"SD 卡的 “Nintendo 3DS” 文件夹中找不到 id0 {custom_install.crypto.id0.hex()} 文件夹。\n"
+                    f"\n"
+                    f"在使用 Tulip3DS 前，你应先确保这张 SD 卡的格式为 FAT32，且插入主机开机过一次。\n"
+                    f"\n"
+                    f"或者，请确保你使用了正确的 movable.sed 文件。"
+                )
 
             # Start the installation
             self.log("开始安装应用...")
             install_state, copied, application_count = custom_install.start()
-            if iend := install_state.get('installed'):
+            if iend := install_state.get("installed"):
                 self.signals.installed_signal.emit(iend, copied, application_count)
                 self.log(f"成功安装了 {len(iend)} 个应用。")
 
-            if failed := install_state.get('failed'):
+            if failed := install_state.get("failed"):
                 self.signals.failed_signal.emit(failed)
                 self.log(f"{len(failed)} 个应用安装失败。请查看日志以获取更多信息。")
 
-
             self.signals.log_signal.emit("安装完成。")
-            self.status_label.setText('安装完成。')
+            self.status_label.setText("安装完成。")
 
         except Exception as e:
             self.signals.log_signal.emit(f"安装失败：{str(e)}")
             self.signals.error_signal.emit(e)
-            self.status_label.setText('安装失败。')
+            self.status_label.setText("安装失败。")
         finally:
             self.signals.finished_signal.emit()
 
 
 def main():
     app = QApplication(sys.argv)
-    icon = QIcon(file_parent + '/bin/common/logo_small.png')
+    icon = QIcon(file_parent + "/bin/common/logo_small.png")
     app.setWindowIcon(icon)
     window = Tulip3DSGUI()
     window.show()
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

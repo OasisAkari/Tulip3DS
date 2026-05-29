@@ -66,7 +66,7 @@ from pyctr.type.cdn import CDNError, CDNReader
 from pyctr.type.cia import CIAError, CIAReader
 from pyctr.type.tmd import TitleMetadataError
 
-from utils.conv_embed import conventer
+from utils.conv_embed import converter
 from utils.custominstall import (
     CustomInstall,
     load_tufinish,
@@ -81,7 +81,7 @@ from utils.custominstall import (
 file_parent = dirname(abspath(__file__))
 current_path = Path(file_parent)
 
-TU_VERSION = "1.7"
+TU_VERSION = "1.8"
 
 
 # automatically load boot9 if it's in the current directory
@@ -181,8 +181,9 @@ class ConvertDialog(QDialog):
     info_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, parent, log_func=print):
+    def __init__(self, parent: 'Tulip3DSGUI', log_func=print):
         super().__init__(parent)
+        self.parent = parent
         self.setWindowTitle("转换 3DS/CCI 文件为 CIA")
         self.setAcceptDrops(True)
 
@@ -358,6 +359,7 @@ class ConvertDialog(QDialog):
 
         def conversion_task():
             total_files = len(conversion_jobs)
+            result = True
             for idx, (file_path, overwrite) in enumerate(conversion_jobs, 1):
                 try:
                     # Get the directory of the file for in-place conversion
@@ -372,20 +374,23 @@ class ConvertDialog(QDialog):
                     )
 
                     # Call converter function
-                    conventer(
+                    re = converter(
                         log=self.log,
                         verbose=True,
                         game=[file_path],
                         output=output_dir,
                         overwrite=overwrite,
                         boot9=b9_paths[0],
-                        ignore_bad_hashes=False,
+                        ignore_bad_hashes=self.parent.force_install,
+                        ignore_encryption=self.parent.force_install,
                         on_progress=lambda percent, read, size: (
                             self.convert_progress_signal.emit(
                                 percent, read, size, idx, total_files
                             )
                         ),
                     )
+                    if not re:
+                        result = False
 
                     self.log(f"转换完成: {basename(file_path)}")
 
@@ -397,7 +402,10 @@ class ConvertDialog(QDialog):
                     )
 
             # Notify main thread that conversion finished
-            self.info_signal.emit("完成", "已转换完成，请检查目录")
+            if result:
+                self.info_signal.emit("完成", "已转换完成，请检查目录")
+            else:
+                self.info_signal.emit("完成", "转换完成，但部分文件可能存在问题，当前无法转换。\n或者，请打开“强制安装”选项，然后再试一次？")
             self.finished_signal.emit()
             self.log("所有文件转换完成")
 
@@ -2259,17 +2267,21 @@ class Tulip3DSGUI(QMainWindow):
                     self.log(f"检查临时目录磁盘容量失败: {e}")
                 os.makedirs(tmp_dir, exist_ok=True)
                 self.log(f"正在转换游戏卡镜像 {path} 为 CIA 格式...")
-                conventer(
+                re = converter(
                     log=self.log,
                     verbose=True,
                     game=[path],
                     output=tmp_dir,
                     boot9=b9_paths[0],
                     ignore_bad_hashes=self.force_install,
+                    ignore_encryption=self.force_install,
                     on_progress=lambda percent, read, size: (
                         self.signals.convert_progress_signal.emit(percent, read, size)
                     ),
                 )
+                if not re:
+                    QMessageBox.warning(self, "警告", "部分文件可能存在问题，当前无法转换。\n或者，请打开“强制安装”选项，然后再试一次？")
+
             self.log(f"转换完成，已缓存到 {tmp_dir}。正在添加到列表中...")
 
             self._add_folder(tmp_dir, delete=True)

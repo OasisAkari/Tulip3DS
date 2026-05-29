@@ -381,8 +381,8 @@ class ConvertDialog(QDialog):
                         output=output_dir,
                         overwrite=overwrite,
                         boot9=b9_paths[0],
-                        ignore_bad_hashes=self.parent.force_install,
-                        ignore_encryption=self.parent.force_install,
+                        ignore_bad_hashes=self.parent.force_install_checkbox.isChecked(),
+                        ignore_encryption=self.parent.force_install_checkbox.isChecked(),
                         on_progress=lambda percent, read, size: (
                             self.convert_progress_signal.emit(
                                 percent, read, size, idx, total_files
